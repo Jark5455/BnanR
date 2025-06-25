@@ -1,0 +1,13 @@
+[package]
+name = "BnanR"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.98"
+ash = "0.38.0"
+intrusive-collections = "0.9.7"
+lazy_static = "1.5.0"
+rayon = "1.10.0"
+sdl3-sys = "0.5.2"
+vk-mem = "0.4.0"
