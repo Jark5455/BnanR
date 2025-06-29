@@ -98,6 +98,20 @@ pub extern "system" fn debug_callback(debug_utils_message_severity_flags_ext: vk
     vk::FALSE
 }
 
+impl Drop for BnanDevice {
+    fn drop(&mut self) {
+        for pool in &self.command_pools {
+            unsafe { self.device.destroy_command_pool(*pool, None) };
+        }
+        
+        let debug_utils_instance = ext::debug_utils::Instance::new(&*ENTRY, &self.instance);
+        unsafe { debug_utils_instance.destroy_debug_utils_messenger(self.debug_messenger, None); }
+
+        let surface_instance = khr::surface::Instance::new(&*ENTRY, &self.instance);
+        unsafe { surface_instance.destroy_surface(self.surface, None) };
+    }
+}
+
 impl BnanDevice {
     pub fn new(window: ArcMut<BnanWindow>) -> Result<BnanDevice> {
         let mut instance = Self::create_instance()?;
@@ -141,8 +155,49 @@ impl BnanDevice {
         )
     }
 
+    pub fn get_physical_device_properties(&self) -> vk::PhysicalDeviceProperties2 {
+        let mut properties = vk::PhysicalDeviceProperties2::default();
+        unsafe { self.instance.get_physical_device_properties2(self.physical_device, &mut properties) };
+        properties
+    }
+    
+    pub fn flush_writes(&self, command_buffer: vk::CommandBuffer, image: vk::Image, layout: vk::ImageLayout, src_access_mask: vk::AccessFlags2, dst_access_mask: vk::AccessFlags2, src_stage_mask: vk::PipelineStageFlags2, dst_stage_mask: vk::PipelineStageFlags2, levels: Option<u32>, layers: Option<u32>) {
+        let aspect_mask = match layout == vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL {
+            true => {vk::ImageAspectFlags::DEPTH}
+            false => {vk::ImageAspectFlags::COLOR}
+        };
+
+        let subresource_range = vk::ImageSubresourceRange::default()
+            .aspect_mask(aspect_mask)
+            .base_mip_level(0)
+            .level_count(levels.unwrap_or(1))
+            .base_array_layer(0)
+            .layer_count(layers.unwrap_or(1));
+
+        let barrier = [
+            vk::ImageMemoryBarrier2::default()
+                .old_layout(layout)
+                .new_layout(layout)
+                .image(image)
+                .subresource_range(subresource_range)
+                .src_access_mask(src_access_mask)
+                .src_stage_mask(src_stage_mask)
+                .dst_access_mask(dst_access_mask)
+                .dst_stage_mask(dst_stage_mask)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        ];
+
+        let dependency_info = vk::DependencyInfo::default()
+            .image_memory_barriers(&barrier);
+
+        unsafe {
+            self.device.cmd_pipeline_barrier2(command_buffer, &dependency_info);
+        }
+    }
+    
     pub fn transition_image_layout_async(&self, image: vk::Image, old_layout: vk::ImageLayout, new_layout: vk::ImageLayout, undefined_exec_stage: Option<vk::PipelineStageFlags2>, levels: Option<u32>, layers: Option<u32>) -> Result<()> {
-        let command_pool = self.command_pools[1];
+        let command_pool = self.command_pools[2];
 
         let command_buffer_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(command_pool)
@@ -167,12 +222,12 @@ impl BnanDevice {
 
         unsafe {
             self.device.end_command_buffer(command_buffer)?;
-            self.device.queue_submit(self.graphics_queue, &submit_info, vk::Fence::null())?;
+            self.device.queue_submit(self.compute_queue, &submit_info, vk::Fence::null())?;
         }
-
+        
         Ok(())
     }
-
+    
     pub fn transition_image_layout_sync(&self, command_buffer: vk::CommandBuffer, image: vk::Image, old_layout: vk::ImageLayout, new_layout: vk::ImageLayout, undefined_exec_stage: Option<vk::PipelineStageFlags2>, levels: Option<u32>, layers: Option<u32>) -> Result<()> {
 
         let aspect_mask = match new_layout == vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL {
@@ -249,7 +304,7 @@ impl BnanDevice {
                 .application_version(vk::make_api_version(0, 1, 0, 0))
                 .engine_name(c"BnanR Engine")
                 .engine_version(vk::make_api_version(0, 1, 0, 0))
-                .api_version(vk::make_api_version(0, 1, 3, 0));
+                .api_version(vk::API_VERSION_1_3);
 
             let extensions = Self::get_required_instance_extensions()?;
 
@@ -529,19 +584,20 @@ impl BnanDevice {
 
     fn create_allocator(instance: &Instance, device: &Device, physical_device: vk::PhysicalDevice) -> Result<Allocator> {
         let mut info = AllocatorCreateInfo::new(instance, device, physical_device);
-        info.vulkan_api_version = vk::make_api_version(0, 1, 3, 0);
+        info.vulkan_api_version = vk::API_VERSION_1_3;
 
         unsafe { Ok(Allocator::new(info)?) }
     }
 
     // constant number of command pools for now, will expand later
     // must be multiple of 2
+
+    // in a perfect world below this would work
+    // let num_pools = std::thread::available_parallelism()?.get();
+    
     const NUM_POOLS: u32 = 4;
 
     fn create_command_pools(device: &Device, indices: &QueueIndices) -> Result<Vec<vk::CommandPool>> {
-
-        // in a perfect world below would work
-        // let num_pools = std::thread::available_parallelism()?.get();
 
         let num_pools = Self::NUM_POOLS;
         let mut pools = Vec::with_capacity(num_pools as usize);

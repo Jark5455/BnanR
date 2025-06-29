@@ -1,7 +1,6 @@
 use intrusive_collections::intrusive_adapter;
 use intrusive_collections::{LinkedList, LinkedListLink};
-
-use intrusive_collections::linked_list::{Cursor, CursorMut};
+use intrusive_collections::linked_list::{CursorMut};
 
 pub struct Node<T> {
     pub link: LinkedListLink,

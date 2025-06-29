@@ -3,9 +3,11 @@ use ash::*;
 
 use crate::core::ArcMut;
 use crate::core::bnan_device::{BnanDevice, SwapChainSupportDetails};
+use crate::core::bnan_window::{WindowObserver};
 
 pub struct BnanSwapchain {
     pub device: ArcMut<BnanDevice>,
+    pub loader: khr::swapchain::Device,
     pub swapchain: vk::SwapchainKHR,
     pub present_mode: vk::PresentModeKHR,
     pub surface_format: vk::SurfaceFormatKHR,
@@ -14,27 +16,56 @@ pub struct BnanSwapchain {
     pub image_views: Vec<vk::ImageView>,
 }
 
+impl Drop for BnanSwapchain {
+    fn drop(&mut self) {
+
+        let device = self.device.lock().unwrap();
+        
+        for image_view in &self.image_views {
+            unsafe { device.device.destroy_image_view(*image_view, None); }
+        }
+        
+        unsafe {
+            self.loader.destroy_swapchain(self.swapchain, None);
+        }
+    }
+}
+
+impl WindowObserver<(i32, i32)> for BnanSwapchain {
+    fn update(&mut self, data: (i32, i32)) {
+        
+        let extent = vk::Extent2D::default()
+            .width(data.0 as u32)
+            .height(data.1 as u32);
+        
+        self.recreate_swapchain(extent).unwrap();
+    }
+}
+
 impl BnanSwapchain {
-    pub fn new(device: ArcMut<BnanDevice>) -> Result<BnanSwapchain> {
+    pub fn new(device: ArcMut<BnanDevice>, extent: Option<vk::Extent2D>, old_swapchain: Option<vk::SwapchainKHR>) -> Result<BnanSwapchain> {
 
         let swapchain_support = device.lock().unwrap().get_swapchain_support()?;
-        let extent = swapchain_support.capabilities.current_extent;
-
-        if extent.width == u32::MAX {
-            bail!("Something went wrong in swapchain creation");
-        }
-
+        
+        let default_extent = vk::Extent2D::default()
+            .height(800)
+            .width(600);
+        
+        let extent = extent.unwrap_or(default_extent);
+        
+        let loader = Self::create_loader(device.clone());
         let surface_format = Self::choose_swap_surface_format(swapchain_support.formats.clone());
         let present_mode = Self::choose_swap_present_mode(swapchain_support.present_modes.clone());
         let image_count = Self::choose_swap_image_count(&swapchain_support);
         
-        let swapchain = Self::create_swapchain(device.clone(), extent, surface_format, image_count, present_mode, None)?;
-        let images = Self::get_swapchain_images(device.clone(), swapchain)?;
+        let swapchain = Self::create_swapchain(device.clone(), &loader, extent, surface_format, image_count, present_mode, old_swapchain)?;
+        let images = Self::get_swapchain_images(device.clone(), &loader, swapchain)?;
         let image_views = Self::create_swapchain_image_views(device.clone(), images.clone(), surface_format.format)?;
 
         Ok (
             BnanSwapchain {
                 device,
+                loader,
                 swapchain,
                 present_mode,
                 surface_format,
@@ -46,16 +77,15 @@ impl BnanSwapchain {
     }
 
     pub fn recreate_swapchain(&mut self, extent: vk::Extent2D) -> Result<()> {
-        
-        {
-            let tmp_device = self.device.lock().unwrap();
-            unsafe { tmp_device.device.queue_wait_idle(tmp_device.graphics_queue)? };
-        }
-        
         let old_swapchain = self.swapchain.clone();
-        self.swapchain = Self::create_swapchain(self.device.clone(), extent, self.surface_format, self.image_count, self.present_mode, Some(old_swapchain))?;
-        
+        let new_swapchain = BnanSwapchain::new(self.device.clone(), Some(extent), Some(old_swapchain))?;
+        let _ = std::mem::replace(self, new_swapchain);
         Ok(())
+    }
+    
+    fn create_loader(device: ArcMut<BnanDevice>) -> khr::swapchain::Device {
+        let device = device.lock().unwrap();
+        khr::swapchain::Device::new(&device.instance, &device.device)
     }
     
     fn choose_swap_image_count(swapchain_support: &SwapChainSupportDetails) -> u32 {
@@ -91,15 +121,12 @@ impl BnanSwapchain {
         available_formats[0]
     }
 
-    fn create_swapchain(device: ArcMut<BnanDevice>, extent: vk::Extent2D, surface_format: vk::SurfaceFormatKHR, image_count: u32, present_mode: vk::PresentModeKHR, old_swapchain: Option<vk::SwapchainKHR>) -> Result<vk::SwapchainKHR> {
-
-        let device = device.lock().unwrap();
-
-        let swapchain_support = device.get_swapchain_support()?;
-        let swapchain_device = khr::swapchain::Device::new(&device.instance, &device.device);
+    fn create_swapchain(device: ArcMut<BnanDevice>, loader: &khr::swapchain::Device, extent: vk::Extent2D, surface_format: vk::SurfaceFormatKHR, image_count: u32, present_mode: vk::PresentModeKHR, old_swapchain: Option<vk::SwapchainKHR>) -> Result<vk::SwapchainKHR> {
+        
+        let swapchain_support = device.lock().unwrap().get_swapchain_support()?;
 
         let mut swapchain_info = vk::SwapchainCreateInfoKHR::default()
-            .surface(device.surface)
+            .surface(device.lock().unwrap().surface)
             .min_image_count(image_count)
             .image_format(surface_format.format)
             .image_color_space(surface_format.color_space)
@@ -117,15 +144,12 @@ impl BnanSwapchain {
         }
 
         unsafe {
-            Ok(swapchain_device.create_swapchain(&swapchain_info, None)?)
+            Ok(loader.create_swapchain(&swapchain_info, None)?)
         }
     }
 
-    fn get_swapchain_images(device: ArcMut<BnanDevice>, swapchain: vk::SwapchainKHR) -> Result<Vec<vk::Image>> {
-        let device = device.lock().unwrap();
-        let swapchain_device = khr::swapchain::Device::new(&device.instance, &device.device);
-
-        unsafe { Ok(swapchain_device.get_swapchain_images(swapchain)?) }
+    fn get_swapchain_images(device: ArcMut<BnanDevice>, loader: &khr::swapchain::Device, swapchain: vk::SwapchainKHR) -> Result<Vec<vk::Image>> {
+        unsafe { Ok(loader.get_swapchain_images(swapchain)?) }
     }
 
     fn create_swapchain_image_views(device: ArcMut<BnanDevice>, images: Vec<vk::Image>, format: vk::Format) -> Result<Vec<vk::ImageView>> {
