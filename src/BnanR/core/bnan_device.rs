@@ -104,8 +104,10 @@ impl Drop for BnanDevice {
             unsafe { self.device.destroy_command_pool(*pool, None) };
         }
         
-        let debug_utils_instance = ext::debug_utils::Instance::new(&*ENTRY, &self.instance);
-        unsafe { debug_utils_instance.destroy_debug_utils_messenger(self.debug_messenger, None); }
+        if ENABLE_VALIDATION_LAYERS {
+            let debug_utils_instance = ext::debug_utils::Instance::new(&*ENTRY, &self.instance);
+            unsafe { debug_utils_instance.destroy_debug_utils_messenger(self.debug_messenger, None); }
+        }
 
         let surface_instance = khr::surface::Instance::new(&*ENTRY, &self.instance);
         unsafe { surface_instance.destroy_surface(self.surface, None) };

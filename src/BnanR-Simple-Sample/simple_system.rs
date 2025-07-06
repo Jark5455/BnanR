@@ -1,8 +1,8 @@
-
 #[allow(dead_code)]
 
 use anyhow::*;
 use ash::*;
+use cgmath::*;
 
 use BnanR::core::ArcMut;
 use BnanR::core::bnan_buffer::BnanBuffer;
@@ -16,7 +16,7 @@ use BnanR::core::bnan_window::WindowObserver;
 const SIMPLE_COMP_FILEPATH: &str = "./build/BnanR-Sample-Shaders/simple.comp.spv";
 
 #[repr(C, align(16))]
-pub struct Vec4(cgmath::Vector4<f32>);
+pub struct Vec4(Vector4<f32>);
 
 #[repr(C)]
 pub struct SimpleUBO {
@@ -26,6 +26,7 @@ pub struct SimpleUBO {
     focal_length: f32,
     viewport_width: f32,
     viewport_height: f32,
+    vfov: f32,
     camera_center: Vec4,
     viewport_u: Vec4,
     viewport_v: Vec4,
@@ -33,34 +34,51 @@ pub struct SimpleUBO {
     pixel_delta_v: Vec4,
     viewport_upper_left: Vec4,
     pixel00_loc: Vec4,
+    look_from: Vec4,
+    look_at: Vec4,
+    vup: Vec4,
 }
 
 #[repr(C)]
 pub struct Sphere {
     material: i32,
     radius: f32,
+    fuzz: f32,
+    ri: f32,
     center: Vec4,
-    // albedo: Vec4,
+    albedo: Vec4,
 }
 
 impl SimpleUBO {
     pub fn new(image_extent: vk::Extent2D, num_spheres: i32, delta_time: f32) -> SimpleUBO {
-        
+
+        let look_from = Vec4(Vector4::new(0.0, 0.0, 0.0, 0.0));
+        let look_at = Vec4(Vector4::new(0.0, 0.0, -1.0, 0.0));
+        let vup = Vec4(Vector4::new(0.0, 1.0, 0.0, 0.0));
+
         let aspect_ratio = image_extent.width as f32 / image_extent.height as f32;
-        let focal_length = 1.0;
-        let viewport_height = 2.0;
+        let focal_length = (look_from.0 - look_at.0).magnitude();
+
+        let vfov = 90.0_f32.to_radians();
+        let h = (vfov / 2.0).tan();
+
+        let viewport_height = 2.0 * h * focal_length;
         let viewport_width = viewport_height * aspect_ratio;
-        let camera_center = Vec4(cgmath::Vector4::new(0.0, 0.0, 0.0, 0.0));
+        let camera_center = Vec4(Vector4::new(0.0, 0.0, 0.0, 0.0));
+
+        let w = (look_from.0 - look_at.0).truncate().normalize();
+        let u = vup.0.truncate().cross(w).normalize();
+        let v = w.cross(u);
         
-        let viewport_u = Vec4(cgmath::Vector4::new(viewport_width, 0.0, 0.0, 0.0));
-        let viewport_v = Vec4(cgmath::Vector4::new(0.0, -viewport_height, 0.0, 0.0));
+        let viewport_u = Vec4(viewport_width * u.extend(0.0));
+        let viewport_v = Vec4(viewport_height * -v.extend(0.0));
         
         let pixel_delta_u = Vec4(viewport_u.0 / image_extent.width as f32);
         let pixel_delta_v = Vec4(viewport_v.0 / image_extent.height as f32);
         
-        let viewport_upper_left = Vec4(camera_center.0 - cgmath::Vector4::new(0.0, 0.0, focal_length, 0.0) - viewport_u.0/2.0 - viewport_v.0/2.0);
+        let viewport_upper_left = Vec4(camera_center.0 - (focal_length * w.extend(0.0)) - viewport_u.0/2.0 - viewport_v.0/2.0);
         let pixel00_loc = Vec4(viewport_upper_left.0 + 0.5 * (pixel_delta_u.0 + pixel_delta_v.0));
-        
+
         SimpleUBO {
             aspect_ratio,
             focal_length,
@@ -69,12 +87,16 @@ impl SimpleUBO {
             camera_center,
             viewport_u,
             viewport_v,
+            vfov,
             pixel_delta_u,
             pixel_delta_v,
             viewport_upper_left,
             pixel00_loc,
             num_spheres,
-            delta_time
+            delta_time,
+            look_from,
+            look_at,
+            vup
         }
     }
 }
@@ -150,6 +172,14 @@ impl WindowObserver<(i32, i32)> for SimpleSystem {
     }
 }
 
+impl Drop for SimpleSystem {
+    fn drop(&mut self) {
+        unsafe {
+            self.device.lock().unwrap().device.destroy_sampler(self.draw_image_sampler, None);
+        }
+    }
+}
+
 impl SimpleSystem {
     pub fn new(device: ArcMut<BnanDevice>, initial_extent: vk::Extent2D) -> Result<SimpleSystem> {
 
@@ -162,16 +192,39 @@ impl SimpleSystem {
             
             Sphere {
                 material: 0,
-                center: Vec4(cgmath::Vector4::new(0.0, -100.5, -1.0, 0.0)),
+                center: Vec4(Vector4::new(0.0, -100.5, -1.0, 0.0)),
                 radius: 100.0,
+                fuzz: 0.0,
+                ri: 0.0,
+                albedo: Vec4(Vector4::new(34.0 / 255.0, 34.0 / 255.0, 34.0 / 255.0, 0.0)),
             },
             
             Sphere {
                 material: 0,
-                center: Vec4(cgmath::Vector4::new(0.0, 0.0, -1.0, 0.0)),
+                center: Vec4(Vector4::new(0.0, 0.0, -1.2, 0.0)),
                 radius: 0.5,
-                // albedo: Vec4(cgmath::Vector4::new(0.1, 0.2, 0.5, 0.0)),
-            }
+                fuzz: 0.0,
+                ri: 0.0,
+                albedo: Vec4(Vector4::new(0.1, 0.2, 0.5, 0.0)),
+            },
+
+            Sphere {
+                material: 2,
+                center: Vec4(Vector4::new(-1.0, 0.0, -1.0, 0.0)),
+                radius: 0.5,
+                fuzz: 0.0,
+                ri: 1.5,
+                albedo: Vec4(Vector4::new(0.8, 0.8, 0.8, 0.0)),
+            },
+
+            Sphere {
+                material: 1,
+                center: Vec4(Vector4::new(1.0, 0.0, -1.0, 0.0)),
+                radius: 0.5,
+                fuzz: 0.25,
+                ri: 0.0,
+                albedo: Vec4(Vector4::new(0.8, 0.6, 0.2, 0.0)),
+            },
         ];
 
         let storage_buffers = Self::create_storage_buffers(device.clone(), spheres.len() as u32)?;
@@ -246,6 +299,7 @@ impl SimpleSystem {
     }
 
     pub fn update_uniform_buffers(&mut self, frame_info: &BnanFrameInfo) -> Result<()> {
+        
         let extent = self.draw_images[0].image_extent;
         let image_extent = vk::Extent2D::default()
             .width(extent.width)

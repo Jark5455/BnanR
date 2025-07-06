@@ -18,9 +18,12 @@ pub struct BnanWindow {
     
     pub quit_observers: Vec<RcMut<dyn WindowObserver<()>>>,
     pub resize_observers: Vec<RcMut<dyn WindowObserver<(i32, i32)>>>,
+    pub mouse_observers: Vec<RcMut<dyn WindowObserver<(f32, f32)>>>,
     
     pub atomic_quit_observers: Vec<ArcMut<dyn WindowObserver<()>>>,
     pub atomic_resize_observers: Vec<ArcMut<dyn WindowObserver<(i32, i32)>>>,
+    pub atomic_mouse_observers: Vec<ArcMut<dyn WindowObserver<(f32, f32)>>>,
+
 }
 
 impl Drop for BnanWindow {
@@ -31,6 +34,14 @@ impl Drop for BnanWindow {
         }
     }
 }
+
+const MOVE_LEFT: SDL_Scancode = SDL_SCANCODE_A;
+const MOVE_RIGHT: SDL_Scancode = SDL_SCANCODE_D;
+const MOVE_FORWARD: SDL_Scancode = SDL_SCANCODE_W;
+const MOVE_BACK: SDL_Scancode = SDL_SCANCODE_S;
+
+const MOVE_UP: SDL_Scancode = SDL_SCANCODE_SPACE;
+const MOVE_DOWN: SDL_Scancode = SDL_SCANCODE_LCTRL;
 
 impl BnanWindow {
     pub fn new(w: i32, h: i32) -> Result<BnanWindow> {
@@ -46,8 +57,11 @@ impl BnanWindow {
                 bail!(error);
             }
             
+            // SDL_SetWindowFullscreen(pwindow, true);
             SDL_SetWindowResizable(pwindow, true);
             SDL_SetWindowFocusable(pwindow, true);
+            // SDL_SetWindowMouseGrab(pwindow, true);
+            // SDL_SetWindowRelativeMouseMode(pwindow, true);
             
             Box::from_raw(pwindow)
         };
@@ -59,9 +73,11 @@ impl BnanWindow {
             
             quit_observers: Vec::new(),
             resize_observers: Vec::new(),
+            mouse_observers: Vec::new(),
             
             atomic_quit_observers: Vec::new(),
             atomic_resize_observers: Vec::new(),
+            atomic_mouse_observers: Vec::new(),
         })
     }
 
@@ -90,6 +106,10 @@ impl BnanWindow {
     pub fn register_resize_observer(&mut self, observer: RcMut<dyn WindowObserver<(i32, i32)>>) {
         self.resize_observers.push(observer);
     }
+
+    pub fn register_mouse_observer(&mut self, observer: RcMut<dyn WindowObserver<(f32, f32)>>) {
+        self.mouse_observers.push(observer);
+    }
     
     pub fn register_atomic_quit_observer(&mut self, observer: ArcMut<dyn WindowObserver<()>>) {
         self.atomic_quit_observers.push(observer);
@@ -98,12 +118,18 @@ impl BnanWindow {
     pub fn register_atomic_resize_observer(&mut self, observer: ArcMut<dyn WindowObserver<(i32, i32)>>) {
         self.atomic_resize_observers.push(observer);
     }
+
+    pub fn register_atomic_mouse_observer(&mut self, observer: ArcMut<dyn WindowObserver<(f32, f32)>>) {
+        self.atomic_mouse_observers.push(observer);
+    }
     
     pub fn clear_observers(&mut self) {
         self.atomic_quit_observers.clear();
         self.atomic_resize_observers.clear();
+        self.atomic_mouse_observers.clear();
         self.quit_observers.clear();
         self.resize_observers.clear();
+        self.mouse_observers.clear();
     }
     
     pub fn process_events(&mut self) {
@@ -136,6 +162,27 @@ impl BnanWindow {
                     for observer in &self.atomic_resize_observers {
                         observer.lock().unwrap().update((self.width, self.height));
                     }
+                },
+
+                SDL_EVENT_MOUSE_MOTION => {
+                    let xrel = e.motion.xrel as f32;
+                    let yrel = e.motion.yrel as f32;
+
+                    for observer in &self.mouse_observers {
+                        observer.borrow_mut().update((xrel, yrel));
+                    }
+
+                    for observer in &self.atomic_mouse_observers {
+                        observer.lock().unwrap().update((xrel, yrel));
+                    }
+                },
+
+                SDL_EVENT_KEY_DOWN => {
+                    
+                },
+
+                SDL_EVENT_KEY_UP => {
+
                 },
 
                 SDL_EVENT_WINDOW_MINIMIZED => {

@@ -57,10 +57,17 @@ float degrees_to_radians(float degrees) {
     return degrees * PI / 180.0;
 }
 
+// mat 0 = lambertian
+// mat 1 = metal
+// mat 2 = dielectric
+
 struct sphere {
     int material;
     float radius;
+    float fuzz;
+    float ri;
     vec3 center;
+    vec3 albedo;
 };
 
 struct ray {
@@ -73,6 +80,7 @@ struct hitrecord {
     float t;
     vec3 p;
     vec3 normal;
+    sphere s;
 };
 
 struct interval {
@@ -85,7 +93,7 @@ const interval UNIVERSE = interval(-INFINITY, INFINITY);
 
 // number of samples for anti aliasing
 
-const int SAMPLES = 16;
+const int SAMPLES = 4;
 
 layout (local_size_x = 32, local_size_y = 32) in;
 layout (rgba16f, set = 0, binding = 0) uniform image2D image;
@@ -97,6 +105,7 @@ layout (set = 0, binding = 1) uniform SimpleUBO {
     float focal_length;
     float viewport_width;
     float viewport_height;
+    float vfov;
     vec3 camera_center;
     vec3 viewport_u;
     vec3 viewport_v;
@@ -104,6 +113,9 @@ layout (set = 0, binding = 1) uniform SimpleUBO {
     vec3 pixel_delta_v;
     vec3 viewport_upper_left;
     vec3 pixel00_loc;
+    vec3 look_from;
+    vec3 look_at;
+    vec3 vup;
 } ubo;
 
 layout (set = 0, binding = 2) readonly buffer SpheresSSBO {
@@ -137,11 +149,65 @@ bool vec_near_zero(vec3 v) {
     return (abs(v.x) < s) && (abs(v.y) < s) && (abs(v.z) < s);
 }
 
-// shitty math below
+vec3 vec_reflect(vec3 v, vec3 n) {
+    return v - 2*dot(v,n)*n;
+}
+
+vec3 vec_refract(vec3 v, vec3 uv, vec3 n, float etai_over_etat) {
+    float cos_theta = min(dot(-uv, n), 1.0);
+    vec3 r_out_perp =  etai_over_etat * (uv + cos_theta*n);
+    vec3 r_out_parallel = sqrt(abs(1.0 - dot(r_out_perp, r_out_perp))) * n;
+    return r_out_perp + r_out_parallel;
+}
+
+void lambertian_scatter(ray r, hitrecord rec, inout ray scattered) {
+    vec3 jitter = RandomUnit(seed);
+    if(isnan(jitter.r) || isnan(jitter.g) || isnan(jitter.b)){
+        jitter = vec3(0.);
+    }
+
+    vec3 target = (rec.p + rec.normal + jitter);
+    scattered.origin = rec.p;
+    scattered.direction = normalize(target - rec.p);
+
+    if (vec_near_zero(scattered.direction))
+        scattered.direction = normalize(rec.normal);
+}
+
+bool metal_scatter(ray r, hitrecord rec, inout ray scattered) {
+    vec3 reflected = normalize(reflect(r.direction, rec.normal)) + (rec.s.fuzz * RandomUnit(seed));
+    scattered.origin = rec.p;
+    scattered.direction = reflected;
+    return dot(scattered.direction, rec.normal) > 0;
+}
+
+void dielectric_scatter(ray r, hitrecord rec, inout ray scattered) {
+
+    float ri = rec.front_face ? (1.0 / rec.s.ri) : rec.s.ri;
+    vec3 unit_direction = normalize(r.direction);
+
+    float cos_theta = min(dot(-unit_direction, rec.normal), 1.0);
+    float sin_theta = sqrt(1.0 - cos_theta * cos_theta);
+
+    bool cannot_refract = ri * sin_theta > 1.0;
+    vec3 direction;
+
+    if (cannot_refract)
+        direction = reflect(unit_direction, rec.normal);
+    else
+        direction = refract(unit_direction, rec.normal, ri);
+
+    scattered.origin = rec.p;
+    scattered.direction = normalize(direction);
+}
+
+// bad math below
 // basically, we solve for a quadratic equation where our ray intersects the sphere
 // we use the discriminant (b^2 - 4ac in the quadratic eq) to solve for how many roots
 // if discriminant is >= 0, real roots exists and an intersection occurs
 // then we solve for normal vector
+// technically that means that this only works for spheres and not planes, but ill figure that
+// part out later
 
 bool sphere_hit(sphere s, ray r, interval ray_t, inout hitrecord rec) {
 
@@ -171,7 +237,7 @@ bool sphere_hit(sphere s, ray r, interval ray_t, inout hitrecord rec) {
     if(!interval_surrounds(ray_t, t))
         return false;
 
-    rec = hitrecord(frontFace, t, hit_point, hit_normal);
+    rec = hitrecord(frontFace, t, hit_point, hit_normal, s);
 
     return true;
 }
@@ -187,27 +253,42 @@ bool world_hit(ray r, interval ray_t, inout hitrecord rec) {
     return has_hit_anything;
 }
 
-const int MAX_DEPTH = 15;
+const int MAX_DEPTH = 5;
 
 vec3 ray_color(ray r) {
 
     hitrecord rec;
     vec3 col = vec3(1.0);
 
-    for(int i = 0; i < MAX_DEPTH; i++)
-    {
+    for(int i = 0; i < MAX_DEPTH; i++) {
         bool hit = world_hit(r, interval(0.001, INFINITY), rec);
+
         if(hit) {
-            vec3 jitter = RandomUnit(seed);
-            if(isnan(jitter.r) || isnan(jitter.g) || isnan(jitter.b)){
-                jitter = vec3(0.);
+
+            ray scattered;
+
+            if (rec.s.material == 0) {
+                lambertian_scatter(r, rec, scattered);
+                col *= rec.s.albedo;
+
+                r.origin = scattered.origin;
+                r.direction = scattered.direction;
+            } else if (rec.s.material == 1) {
+                if (metal_scatter(r, rec, scattered)) {
+                    col *= rec.s.albedo;
+
+                    r.origin = scattered.origin;
+                    r.direction = scattered.direction;
+                } else {
+                    col *= vec3(0);
+                    break;
+                }
+            } else if (rec.s.material == 2) {
+                dielectric_scatter(r, rec, scattered);
+                r.origin = scattered.origin;
+                r.direction = scattered.direction;
             }
 
-            col *= 0.5;
-            vec3 target = (rec.p + rec.normal + jitter);
-
-            r.origin = rec.p;
-            r.direction = normalize(target - rec.p);
         } else {
             vec3 dir = normalize(r.direction);
             float t = 0.5 * (dir.y + 1.0);
@@ -247,16 +328,11 @@ vec4 post_processing(vec3 color) {
     color.y = interval_clamp(color_interval, color.y);
     color.z = interval_clamp(color_interval, color.z);
 
-    // gamma correction for srgb since for some reason my driver isnt doing it for me
-
-    float gamma = 2.2;
-    vec3 srgbColor = pow(color, vec3(gamma));
-    return vec4(srgbColor, 1.0);
+    return vec4(color, 1.0);
 }
 
 void main() {
     ivec2 texelCoord = ivec2(gl_GlobalInvocationID.xy);
-    ivec2 size = imageSize(image);
 
     float i = float(texelCoord.x);
     float j = float(texelCoord.y);
