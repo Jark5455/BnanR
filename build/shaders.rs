@@ -13,7 +13,9 @@ pub fn compile_shaders() {
     let build_dir = Path::new(&build_dir_pth).parent().unwrap().parent().unwrap();
 
     let compiler = shaderc::Compiler::new().unwrap();
-    let options = shaderc::CompileOptions::new().unwrap();
+    let mut options = shaderc::CompileOptions::new().unwrap();
+    options.set_target_env(shaderc::TargetEnv::Vulkan, shaderc::EnvVersion::Vulkan1_1 as u32);
+    options.set_target_spirv(shaderc::SpirvVersion::V1_4);
 
     for entry in glob("src/BnanR-Sample-Shaders/**/*.*").expect("glob failed") {
         let path = entry.unwrap();
@@ -28,6 +30,7 @@ pub fn compile_shaders() {
             "vert" => shaderc::ShaderKind::Vertex,
             "frag" => shaderc::ShaderKind::Fragment,
             "comp" => shaderc::ShaderKind::Compute,
+            "mesh" => shaderc::ShaderKind::Mesh,
             _ => { panic!("unknown shader type: {}", ext); }
         };
 

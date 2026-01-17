@@ -14,6 +14,8 @@ pub mod bnan_descriptors;
 pub mod bnan_pipeline;
 pub mod bnan_buffer;
 pub mod bnan_camera;
+pub mod bnan_render_graph;
+pub mod bnan_mesh;
 
 pub type RcMut<T> = Rc<RefCell<T>>;
 pub type ArcMut<T> = Arc<Mutex<T>>;

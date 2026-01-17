@@ -27,7 +27,7 @@ impl Drop for BnanBuffer {
 
 impl BnanBuffer {
 
-    pub unsafe fn new(device: ArcMut<BnanDevice>, instance_size: vk::DeviceSize, instance_count: u32, usage: vk::BufferUsageFlags, properties: vk::MemoryPropertyFlags) -> Result<BnanBuffer> {
+    pub fn new(device: ArcMut<BnanDevice>, instance_size: vk::DeviceSize, instance_count: u32, usage: vk::BufferUsageFlags, properties: vk::MemoryPropertyFlags) -> Result<BnanBuffer> {
         let alignment_size = match usage {
             vk::BufferUsageFlags::STORAGE_BUFFER => {
                 let min_offset_alignment = device.lock().unwrap().get_physical_device_properties().properties.limits.min_storage_buffer_offset_alignment;
@@ -72,6 +72,17 @@ impl BnanBuffer {
             unsafe { self.device.lock().unwrap().allocator.unmap_memory(&mut self.allocation) }
             self.mapped = std::ptr::null_mut();
         }
+    }
+
+    pub fn write_to_buffer(&mut self, data: &[u8], offset: vk::DeviceSize) -> Result<()> {
+        if self.mapped.is_null() { bail!("Cannot copy to unmapped buffer") }
+
+        unsafe {
+            let dest = self.mapped.add(offset as usize);
+            std::ptr::copy_nonoverlapping(data.as_ptr(), dest, data.len());
+        }
+        
+        Ok(())
     }
 
     pub fn flush(&self, size: vk::DeviceSize, offset: vk::DeviceSize) -> Result<()> {

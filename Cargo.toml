@@ -8,21 +8,35 @@ build = "build/main.rs"
 anyhow = "1.0.98"
 ash = "0.38.0"
 cgmath = "0.18.0"
-exr = "1.73.0"
-intrusive-collections = "0.9.7"
 lazy_static = "1.5.0"
 rayon = "1.10.0"
-sdl3-sys = "0.5.2"
-vk-mem = "0.4.0"
+sdl3-sys = "0.6.0+SDL-3.4.0"
+vk-mem = "0.5.0"
+flate2 = "1.0"
+md5 = "0.8.0"
+serde = { version = "1.0", features = ["derive"] }
+bincode = "1.3"
+clap = { version = "4.5", features = ["derive"] }
+russimp = "3.2"
+exr = { git = "https://github.com/virtualritz/exrs", branch = "dwa-restore" }
+image = "0.24"
 
 [build-dependencies]
 glob = "0.3.2"
-shaderc = "0.9.1"
+shaderc = "0.10.1"
 
 [lib]
 name = "BnanR"
 path = "src/BnanR/lib.rs"
 
 [[bin]]
-name = "BnanR-Sample"
-path = "src/BnanR-Simple-Sample/main.rs"
+name = "BnanR-Rasterization-Sample"
+path = "src/BnanR-Simple-Raster-Sample/main.rs"
+
+[[bin]]
+name = "BnanR-Raytracing-Sample"
+path = "src/BnanR-Simple-Raytracing-Sample/main.rs"
+
+[[bin]]
+name = "BnanPKG"
+path = "src/BnanPKG/main.rs"

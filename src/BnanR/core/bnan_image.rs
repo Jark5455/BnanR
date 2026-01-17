@@ -10,43 +10,70 @@ pub struct BnanImage {
     pub device: ArcMut<BnanDevice>,
     pub image: vk::Image,
     pub image_view: vk::ImageView,
-    pub image_allocation: Allocation,
+    pub image_allocation: Option<Allocation>,
     pub image_extent: vk::Extent3D,
     pub format: vk::Format,
+    pub owned: bool,
 }
 
 impl Drop for BnanImage {
     fn drop(&mut self) {
-        unsafe {
-            self.device.lock().unwrap().device.destroy_image_view(self.image_view, None);
-            self.device.lock().unwrap().allocator.destroy_image(self.image, &mut self.image_allocation);
+        if self.owned {
+            unsafe {
+                self.device.lock().unwrap().device.destroy_image_view(self.image_view, None);
+                if let Some(mut alloc) = self.image_allocation.take() {
+                    self.device.lock().unwrap().allocator.destroy_image(self.image, &mut alloc);
+                }
+            }
         }
     }
 }
 
 impl BnanImage {
-    pub fn new(device: ArcMut<BnanDevice>, format: vk::Format, usage: vk::ImageUsageFlags, image_extent: vk::Extent3D) -> Result<BnanImage> {
-        let (image, image_allocation) = Self::create_image(device.clone(), format, usage, image_extent)?;
-        let image_view = Self::create_image_view(device.clone(), image, format, vk::ImageAspectFlags::COLOR)?;
+    pub fn new(device: ArcMut<BnanDevice>, format: vk::Format, usage: vk::ImageUsageFlags, image_extent: vk::Extent3D, sample_count: vk::SampleCountFlags) -> Result<BnanImage> {
+        let (image, image_allocation) = Self::create_image(device.clone(), format, usage, image_extent, sample_count)?;
+
+        let image_aspect = match format {
+            vk::Format::D32_SFLOAT => vk::ImageAspectFlags::DEPTH,
+            vk::Format::D32_SFLOAT_S8_UINT => vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL,
+            vk::Format::D24_UNORM_S8_UINT => vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL,
+
+            _ => vk::ImageAspectFlags::COLOR,
+        };
+
+        let image_view = Self::create_image_view(device.clone(), image, format, image_aspect)?;
         
         Ok (BnanImage {
             device,
             image,
             image_view,
-            image_allocation,
+            image_allocation: Some(image_allocation),
             image_extent,
-            format
+            format,
+            owned: true,
         })
     }
 
-    fn create_image(device: ArcMut<BnanDevice>, format: vk::Format, usage: vk::ImageUsageFlags, extent: vk::Extent3D) -> Result<(vk::Image, Allocation)> {
+    pub fn from_image(device: ArcMut<BnanDevice>, image: vk::Image, image_view: vk::ImageView, format: vk::Format, image_extent: vk::Extent3D) -> BnanImage {
+        BnanImage {
+            device,
+            image,
+            image_view,
+            image_allocation: None,
+            image_extent,
+            format,
+            owned: false
+        }
+    }
+
+    fn create_image(device: ArcMut<BnanDevice>, format: vk::Format, usage: vk::ImageUsageFlags, extent: vk::Extent3D, sample_count: vk::SampleCountFlags) -> Result<(vk::Image, Allocation)> {
         let info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(format)
             .extent(extent)
             .mip_levels(1)
             .array_layers(1)
-            .samples(vk::SampleCountFlags::TYPE_1)
+            .samples(sample_count)
             .tiling(vk::ImageTiling::OPTIMAL)
             .usage(usage);
 

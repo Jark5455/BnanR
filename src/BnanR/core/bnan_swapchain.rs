@@ -14,6 +14,7 @@ pub struct BnanSwapchain {
     pub image_count: u32,
     pub images: Vec<vk::Image>,
     pub image_views: Vec<vk::ImageView>,
+    pub extent: vk::Extent2D,
 }
 
 impl Drop for BnanSwapchain {
@@ -37,7 +38,12 @@ impl WindowObserver<(i32, i32)> for BnanSwapchain {
         let extent = vk::Extent2D::default()
             .width(data.0 as u32)
             .height(data.1 as u32);
-        
+
+        unsafe {
+            let device = self.device.lock().unwrap();
+            device.device.queue_wait_idle(device.graphics_queue).expect("waited too long on resize");
+        }
+
         self.recreate_swapchain(extent).unwrap();
     }
 }
@@ -72,6 +78,7 @@ impl BnanSwapchain {
                 image_count,
                 images,
                 image_views,
+                extent,
             }
         )
     }
