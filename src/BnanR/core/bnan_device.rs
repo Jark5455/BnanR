@@ -230,7 +230,7 @@ impl BnanBarrierBuilder {
             return Ok(());
         }
         
-        let command_pool = device.command_pools[2]; // Compute pool
+        let command_pool = device.command_pools[BnanDevice::COMPUTE_COMMAND_POOL];
         
         let alloc_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(command_pool)
@@ -330,7 +330,7 @@ impl BnanDevice {
         )
     }
 
-    pub fn get_physical_device_properties(&self) -> vk::PhysicalDeviceProperties2 {
+    pub fn get_physical_device_properties(&self) -> vk::PhysicalDeviceProperties2<'_> {
         let mut properties = vk::PhysicalDeviceProperties2::default();
         unsafe { self.instance.get_physical_device_properties2(self.physical_device, &mut properties) };
         properties
@@ -372,7 +372,7 @@ impl BnanDevice {
     }
     
     pub fn transition_image_layout_async(&self, image: vk::Image, old_layout: vk::ImageLayout, new_layout: vk::ImageLayout, undefined_exec_stage: Option<vk::PipelineStageFlags2>, levels: Option<u32>, layers: Option<u32>) -> Result<()> {
-        let command_pool = self.command_pools[2];
+        let command_pool = self.command_pools[Self::COMPUTE_COMMAND_POOL];
 
         let command_buffer_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(command_pool)
@@ -831,40 +831,39 @@ impl BnanDevice {
         unsafe { Ok(Allocator::new(info)?) }
     }
 
-    const NUM_POOLS: u32 = 6;
+    /// Command pool indices
+    pub const GRAPHICS_COMMAND_POOL: usize = 0;
+    pub const COMPUTE_COMMAND_POOL: usize = 1;
+    pub const TRANSFER_COMMAND_POOL: usize = 2;
 
     fn create_command_pools(device: &Device, indices: &QueueIndices) -> Result<Vec<vk::CommandPool>> {
+        let mut pools = Vec::with_capacity(3);
 
-        let mut pools = Vec::with_capacity(Self::NUM_POOLS as usize);
-
-        for _ in 0..2 {
-            let pool_info = vk::CommandPoolCreateInfo::default()
-                .queue_family_index(indices.graphics_family.unwrap())
-                .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
-            
-            unsafe {
-                pools.push(device.create_command_pool(&pool_info, None)?);
-            }
+        // Index 0: Graphics command pool
+        let graphics_pool_info = vk::CommandPoolCreateInfo::default()
+            .queue_family_index(indices.graphics_family.unwrap())
+            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
+        
+        unsafe {
+            pools.push(device.create_command_pool(&graphics_pool_info, None)?);
         }
 
-        for _ in 0..2 {
-            let pool_info = vk::CommandPoolCreateInfo::default()
-                .queue_family_index(indices.compute_family.unwrap())
-                .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
+        // Index 1: Compute command pool
+        let compute_pool_info = vk::CommandPoolCreateInfo::default()
+            .queue_family_index(indices.compute_family.unwrap())
+            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
 
-            unsafe {
-                pools.push(device.create_command_pool(&pool_info, None)?);
-            }
+        unsafe {
+            pools.push(device.create_command_pool(&compute_pool_info, None)?);
         }
 
-        for _ in 0..2 {
-            let pool_info = vk::CommandPoolCreateInfo::default()
-                .queue_family_index(indices.transfer_family.unwrap())
-                .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
+        // Index 2: Transfer command pool
+        let transfer_pool_info = vk::CommandPoolCreateInfo::default()
+            .queue_family_index(indices.transfer_family.unwrap())
+            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
 
-            unsafe {
-                pools.push(device.create_command_pool(&pool_info, None)?);
-            }
+        unsafe {
+            pools.push(device.create_command_pool(&transfer_pool_info, None)?);
         }
 
         Ok(pools)

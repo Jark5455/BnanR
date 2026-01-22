@@ -15,7 +15,7 @@ use crate::core::bnan_render_graph::pass::RenderPass;
 use crate::core::bnan_image::BnanImage;
 
 
-const CLEAR_COLOR: vk::ClearColorValue = vk::ClearColorValue { float32: [0.0, 0.0, 0.0, 0.0] };
+const CLEAR_COLOR: vk::ClearColorValue = vk::ClearColorValue { float32: [0.0118, 0.0118, 0.0118, 1.0] };
 const CLEAR_DEPTH_STENCIL: vk::ClearDepthStencilValue = vk::ClearDepthStencilValue { depth: 1.0, stencil: 0 };
 
 pub struct BnanRenderGraph {
@@ -95,7 +95,6 @@ impl BnanRenderGraph {
         })
     }
     
-    #[allow(clippy::type_complexity)]
     fn create_sync_objects(device: ArcMut<BnanDevice>, swapchain_image_count: u32) -> Result<(
         [vk::CommandBuffer; FRAMES_IN_FLIGHT],
         [vk::Semaphore; FRAMES_IN_FLIGHT],
@@ -116,7 +115,7 @@ impl BnanRenderGraph {
          let command_buffers_array: [vk::CommandBuffer; FRAMES_IN_FLIGHT] = command_buffers.try_into().map_err(|_| anyhow!("Failed"))?;
 
          let transfer_alloc_info = vk::CommandBufferAllocateInfo::default()
-            .command_pool(device_guard.command_pools[4])
+            .command_pool(device_guard.command_pools[BnanDevice::TRANSFER_COMMAND_POOL])
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_buffer_count(FRAMES_IN_FLIGHT as u32);
             

@@ -1,7 +1,6 @@
 use cgmath::*;
 
-use crate::core::ArcMut;
-use crate::core::bnan_window::{BnanWindow, WindowObserver};
+use crate::core::bnan_window::{WindowObserver};
 
 pub struct BnanCamera {
     pub position: Vector3<f32>,
