@@ -38,6 +38,7 @@ jobs:
         run: cargo vcpkg build
 
       - name: Set VCPKG_ROOT
+        shell: bash
         run: echo "VCPKG_ROOT=${{ github.workspace }}/target/vcpkg/" >> $GITHUB_ENV
 
       - name: Print vcpkg failure logs
