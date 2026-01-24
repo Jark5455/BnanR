@@ -48,7 +48,6 @@ fn main() {
         vec![
             RenderPassResource {
                 handle: backbuffer_handle,
-                access: vk::AccessFlags2::TRANSFER_WRITE,
                 stage: vk::PipelineStageFlags2::TRANSFER,
                 layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                 resolve_target: None,

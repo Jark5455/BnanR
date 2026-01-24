@@ -6,11 +6,13 @@ use ash::*;
 use cgmath::*;
 use russimp::scene::*;
 
-use image::io::Reader as ImageReader;
+use image::ImageReader;
 use exr::prelude::*;
 
-use BnanR::fs::bpk::{BpkArchive, BpkNode};
+use BnanR::fs::bpk::{BpkArchive, BpkEntryData, BpkNode};
 use BnanR::core::bnan_mesh::Vertex;
+
+mod meshlet_processor;
 
 #[derive(Parser)]
 #[command(name = "bpk")]
@@ -89,6 +91,17 @@ enum Commands {
         #[arg(short, long, help = "Output file path (default: stdout)")]
         output: Option<std::path::PathBuf>,
     },
+
+    AddMeshletMesh {
+        #[arg(help = "Path to the .bpk archive")]
+        archive_path: std::path::PathBuf,
+
+        #[arg(help = "Path to the mesh file on disk")]
+        mesh_path: std::path::PathBuf,
+
+        #[arg(help = "Directory inside archive for meshlet data (e.g. 'models/bunny')")]
+        internal_dir: String,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -150,7 +163,7 @@ fn main() -> anyhow::Result<()> {
             if let Some(mesh) = scene.meshes.first() {
                 let positions: Vec<Vector3<f32>> = mesh.vertices.iter().map(|v| Vector3 {x: v.x, y: v.y, z: v.z}).collect();
                 let positions_bytes = unsafe { std::slice::from_raw_parts(positions.as_ptr() as *const u8, positions.len() * 12) }.to_vec();
-                
+
                 let mut complex_vertices = Vec::with_capacity(mesh.vertices.len());
 
                 if mesh.normals.is_empty() {
@@ -179,20 +192,16 @@ fn main() -> anyhow::Result<()> {
                 let indices: Vec<u32> = mesh.faces.iter().flat_map(|face| face.0.clone()).collect();
                 let indices_bytes = unsafe { std::slice::from_raw_parts(indices.as_ptr() as *const u8, indices.len() * 4) }.to_vec();
 
-                let usage_vertex = vk::BufferUsageFlags::VERTEX_BUFFER.as_raw();
-                let usage_index = vk::BufferUsageFlags::INDEX_BUFFER.as_raw();
-                let props = vk::MemoryPropertyFlags::DEVICE_LOCAL.as_raw(); // Should be device local usually
-
                 archive.add_directory(&internal_dir)?;
                 
                 let pos_path = format!("{}/positions", internal_dir);
-                archive.add_raw_bnan_buffer(&pos_path, positions_bytes, 12, positions.len() as u32, usage_vertex, props)?;
+                archive.add_buffer(&pos_path, 12, positions.len() as u32, positions_bytes)?;
 
                 let vert_path = format!("{}/vertices", internal_dir);
-                archive.add_raw_bnan_buffer(&vert_path, vertices_bytes, std::mem::size_of::<Vertex>() as u64, complex_vertices.len() as u32, usage_vertex, props)?;
+                archive.add_buffer(&vert_path, size_of::<Vertex>() as u64, complex_vertices.len() as u32, vertices_bytes)?;
 
                 let ind_path = format!("{}/indices", internal_dir);
-                archive.add_raw_bnan_buffer(&ind_path, indices_bytes, 4, indices.len() as u32, usage_index, props)?;
+                archive.add_buffer(&ind_path, 4, indices.len() as u32, indices_bytes)?;
 
                 archive.save(&archive_path)?;
                 println!("Imported mesh to '{}'", internal_dir);
@@ -270,19 +279,15 @@ fn main() -> anyhow::Result<()> {
                      }
                  }
                  
-                 let usage = (vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST).as_raw();
-                 archive.add_raw_bnan_image(&internal_path, raw_data, width, height, 1, format.as_raw(), usage)?;
+                 archive.add_image(&internal_path, width, height, 1, format, raw_data)?;
 
             } else {
                 let img = ImageReader::open(&image_path)?.decode()?;
                 let width = img.width();
                 let height = img.height();
                 let data = img.to_rgba8().into_raw();
-                
-                let format = vk::Format::R8G8B8A8_SRGB.as_raw();
-                let usage = (vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST).as_raw();
 
-                archive.add_raw_bnan_image(&internal_path, data, width, height, 1, format, usage)?;
+                archive.add_image(&internal_path, width, height, 1, vk::Format::R8G8B8A8_SRGB, data)?;
             }
             
             archive.save(&archive_path)?;
@@ -310,6 +315,83 @@ fn main() -> anyhow::Result<()> {
                 std::io::stdout().write_all(&data)?;
             }
         }
+        Commands::AddMeshletMesh { archive_path, mesh_path, internal_dir } => {
+            let mut archive = if archive_path.exists() {
+                BpkArchive::open(&archive_path)?
+            } else {
+                BpkArchive::new()
+            };
+            
+            println!("Processing mesh for meshlet DAG: {:?}", mesh_path);
+            let scene = Scene::from_file(
+                mesh_path.to_str().unwrap(),
+                vec![
+                    PostProcess::CalculateTangentSpace,
+                    PostProcess::Triangulate,
+                    PostProcess::JoinIdenticalVertices,
+                    PostProcess::SortByPrimitiveType,
+                    PostProcess::MakeLeftHanded,
+                    PostProcess::FlipUVs,
+                    PostProcess::GenerateSmoothNormals,
+                    PostProcess::GenerateUVCoords
+                ]
+            )?;
+
+            if let Some(mesh) = scene.meshes.first() {
+                // Extract positions as f32 array
+                let positions: Vec<f32> = mesh.vertices.iter()
+                    .flat_map(|v| [v.x, v.y, v.z])
+                    .collect();
+
+                // Extract vertex attributes
+                if mesh.normals.is_empty() {
+                    bail!("Mesh has no normals");
+                }
+                if mesh.tangents.is_empty() {
+                    bail!("Mesh has no tangents");
+                }
+
+                let mut vertices: Vec<Vertex> = Vec::with_capacity(mesh.vertices.len());
+                for i in 0..mesh.vertices.len() {
+                    let normal = Vector3 { x: mesh.normals[i].x, y: mesh.normals[i].y, z: mesh.normals[i].z };
+                    let tangent = Vector3 { x: mesh.tangents[i].x, y: mesh.tangents[i].y, z: mesh.tangents[i].z };
+                    let uv = if let Some(uvs) = &mesh.texture_coords[0] {
+                        if i < uvs.len() {
+                            Vector2 { x: uvs[i].x, y: uvs[i].y }
+                        } else { Vector2 { x: 0.0, y: 0.0 } }
+                    } else { Vector2 { x: 0.0, y: 0.0 } };
+                    
+                    vertices.push(Vertex { normal, tangent, uv });
+                }
+
+                // Extract indices
+                let indices: Vec<u32> = mesh.faces.iter()
+                    .flat_map(|face| face.0.clone())
+                    .collect();
+
+                println!("Mesh loaded: {} vertices, {} triangles", 
+                         positions.len() / 3, indices.len() / 3);
+
+                // Generate meshlet DAG
+                let (dag, raw_data) = meshlet_processor::generate_meshlet_dag(
+                    &positions,
+                    &vertices,
+                    &indices,
+                );
+
+                // Store in archive
+                println!("Saving to archive...");
+                archive.add_meshlet_dag(&internal_dir, &dag, &raw_data)?;
+                archive.save(&archive_path)?;
+                
+                println!("Imported meshlet mesh to '{}'", internal_dir);
+                println!("  {} total meshlet nodes", dag.nodes.len());
+                println!("  {} leaf meshlets (LOD 0)", dag.leaf_indices.len());
+                println!("  {} root meshlets (LOD {})", dag.root_indices.len(), dag.max_lod_level);
+            } else {
+                bail!("No meshes found in file");
+            }
+        }
     }
 
     Ok(())
@@ -329,8 +411,12 @@ fn list_recursive(node: &BpkNode, parent_path: &str) {
                     println!("DIR  {}", full_path);
                     list_recursive(&child.node, &full_path);
                 },
-                BpkNode::File { uncompressed_size, .. } => {
-                    println!("FILE {} ({} bytes)", full_path, uncompressed_size);
+                BpkNode::File { data, .. } => {
+
+                    match data {
+                        BpkEntryData::OnDisk { size, .. } => { println!("FILE {} ({} bytes)", full_path, size) }
+                        BpkEntryData::InMemory( data ) => { println!("FILE {} ({} bytes)", full_path, data.len()) }
+                    }
                 }
             }
         }

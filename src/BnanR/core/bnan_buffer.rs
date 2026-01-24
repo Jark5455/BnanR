@@ -43,7 +43,7 @@ impl BnanBuffer {
                 Self::get_alignment_size(instance_size, 1)
             }
         };
-
+        
         let buffer_size = alignment_size * instance_count as u64;
 
         let (buffer, allocation) = Self::create_buffer(device.clone(), buffer_size, usage, properties)?;

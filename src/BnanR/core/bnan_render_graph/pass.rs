@@ -5,7 +5,6 @@ use crate::core::bnan_render_graph::resource::ResourceHandle;
 
 pub struct RenderPassResource {
     pub handle: ResourceHandle,
-    pub access: vk::AccessFlags2,
     pub stage: vk::PipelineStageFlags2,
     pub layout: vk::ImageLayout,
     pub resolve_target: Option<ResourceHandle>,

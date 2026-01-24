@@ -7,7 +7,7 @@ use cgmath::*;
 use BnanR::core::ArcMut;
 use BnanR::core::bnan_buffer::BnanBuffer;
 use BnanR::core::bnan_descriptors::*;
-use BnanR::core::bnan_device::BnanDevice;
+use BnanR::core::bnan_device::{BnanBarrierBuilder, BnanDevice, WorkQueue};
 use BnanR::core::bnan_image::BnanImage;
 use BnanR::core::bnan_pipeline::BnanPipeline;
 use BnanR::core::bnan_rendering::{BnanFrameInfo, FRAMES_IN_FLIGHT};
@@ -125,19 +125,30 @@ impl WindowObserver<(i32, i32)> for SimpleSystem {
             .height(data.1 as u32)
             .depth(1);
 
-        let vec: Result<Vec<_>> = (0..FRAMES_IN_FLIGHT).map(|_| BnanImage::new(self.device.clone(), vk::Format::R16G16B16A16_SFLOAT, vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC, extent, vk::SampleCountFlags::TYPE_1)).collect();
+        let vec: Result<Vec<_>> = (0..FRAMES_IN_FLIGHT).map(|_| BnanImage::new(self.device.clone(), vk::Format::R16G16B16A16_SFLOAT, vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC, vk::MemoryPropertyFlags::DEVICE_LOCAL, extent, vk::SampleCountFlags::TYPE_1)).collect();
 
         let images: [BnanImage; FRAMES_IN_FLIGHT] = match vec.unwrap().try_into() {
             Result::Ok(fences) => fences,
             Err(_) => panic!("something went wrong while creating fences"),
         };
 
-        for image in &images {
-            self.device.lock().unwrap().transition_image_layout_async(image.image, vk::ImageLayout::UNDEFINED, vk::ImageLayout::GENERAL, None, None, None).unwrap();
-        }
+        unsafe {
+            let device_guard = self.device.lock().unwrap();
+            let fence = device_guard.device.create_fence(&vk::FenceCreateInfo::default(), None).unwrap();
 
-        let queue = self.device.lock().unwrap().compute_queue;
-        unsafe { self.device.lock().unwrap().device.queue_wait_idle(queue).unwrap() };
+            let command_buffer = device_guard.begin_commands(WorkQueue::TRANSFER, 1).unwrap()[0];
+
+            let mut builder = BnanBarrierBuilder::new();
+
+            for image in &images {
+                builder.transition_image_layout(image.image, vk::ImageLayout::UNDEFINED, vk::ImageLayout::GENERAL, None, None, None).unwrap();
+            }
+
+            builder.record(&*device_guard, command_buffer);
+
+            device_guard.submit_commands(WorkQueue::TRANSFER, vec![command_buffer], None, Some(fence)).unwrap();
+            device_guard.device.wait_for_fences(&[fence], true, u64::MAX).unwrap();
+        }
 
         self.draw_images = images;
         
@@ -288,13 +299,18 @@ impl SimpleSystem {
             .regions(&blit);
 
         unsafe {
-            self.device.lock().unwrap().device.cmd_bind_pipeline(frame_info.main_command_buffer, vk::PipelineBindPoint::COMPUTE, self.pipeline.pipeline);
-            self.device.lock().unwrap().device.cmd_bind_descriptor_sets(frame_info.main_command_buffer, vk::PipelineBindPoint::COMPUTE, self.pipeline.pipeline_layout, 0, &[self.descriptor_sets[frame_info.frame_index]], &[]);
+            let device_guard = self.device.lock().unwrap();
 
-            self.device.lock().unwrap().device.cmd_dispatch(frame_info.main_command_buffer, x, y, 1);
+            device_guard.device.cmd_bind_pipeline(frame_info.main_command_buffer, vk::PipelineBindPoint::COMPUTE, self.pipeline.pipeline);
+            device_guard.device.cmd_bind_descriptor_sets(frame_info.main_command_buffer, vk::PipelineBindPoint::COMPUTE, self.pipeline.pipeline_layout, 0, &[self.descriptor_sets[frame_info.frame_index]], &[]);
 
-            self.device.lock().unwrap().flush_writes(frame_info.main_command_buffer, self.draw_images[frame_info.frame_index].image, vk::ImageLayout::GENERAL, vk::AccessFlags2::MEMORY_WRITE, vk::AccessFlags2::TRANSFER_READ, vk::PipelineStageFlags2::ALL_COMMANDS, vk::PipelineStageFlags2::TRANSFER, None, None);
-            self.device.lock().unwrap().device.cmd_blit_image2(frame_info.main_command_buffer, &blit_info);
+            device_guard.device.cmd_dispatch(frame_info.main_command_buffer, x, y, 1);
+
+            BnanBarrierBuilder::new()
+                .flush_writes(self.draw_images[frame_info.frame_index].image, vk::ImageLayout::GENERAL, vk::PipelineStageFlags2::ALL_COMMANDS, vk::AccessFlags2::MEMORY_WRITE, vk::PipelineStageFlags2::TRANSFER, vk::AccessFlags2::TRANSFER_READ, None, None)
+                .record(&*device_guard, frame_info.main_command_buffer);
+
+            device_guard.device.cmd_blit_image2(frame_info.main_command_buffer, &blit_info);
         }
     }
 
@@ -343,19 +359,30 @@ impl SimpleSystem {
     }
 
     fn create_draw_images(device: ArcMut<BnanDevice>, extent: vk::Extent3D) -> Result<[BnanImage; FRAMES_IN_FLIGHT]> {
-        let vec: Result<Vec<_>> = (0..FRAMES_IN_FLIGHT).map(|_| BnanImage::new(device.clone(), vk::Format::R16G16B16A16_SFLOAT, vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC, extent, vk::SampleCountFlags::TYPE_1) ).collect();
+        let vec: Result<Vec<_>> = (0..FRAMES_IN_FLIGHT).map(|_| BnanImage::new(device.clone(), vk::Format::R16G16B16A16_SFLOAT, vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC, vk::MemoryPropertyFlags::DEVICE_LOCAL, extent, vk::SampleCountFlags::TYPE_1) ).collect();
 
         let images: [BnanImage; FRAMES_IN_FLIGHT] = match vec?.try_into() {
             Result::Ok(images) => images,
             Err(_) => bail!("something went wrong while creating draw images"),
         };
 
-        for image in &images {
-            device.lock().unwrap().transition_image_layout_async(image.image, vk::ImageLayout::UNDEFINED, vk::ImageLayout::GENERAL, None, None, None)?;
-        }
+        unsafe {
+            let device_guard = device.lock().unwrap();
+            let fence = device_guard.device.create_fence(&vk::FenceCreateInfo::default(), None)?;
 
-        let queue = device.lock().unwrap().compute_queue;
-        unsafe { device.lock().unwrap().device.queue_wait_idle(queue)? };
+            let command_buffer = device_guard.begin_commands(WorkQueue::TRANSFER, 1)?[0];
+
+            let mut builder = BnanBarrierBuilder::new();
+
+            for image in &images {
+                builder.transition_image_layout(image.image, vk::ImageLayout::UNDEFINED, vk::ImageLayout::GENERAL, None, None, None)?;
+            }
+
+            builder.record(&*device_guard, command_buffer);
+
+            device_guard.submit_commands(WorkQueue::TRANSFER, vec![command_buffer], None, Some(fence))?;
+            device_guard.device.wait_for_fences(&[fence], true, u64::MAX)?;
+        }
 
         Ok(images)
     }

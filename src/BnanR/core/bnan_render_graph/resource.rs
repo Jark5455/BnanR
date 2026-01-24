@@ -21,7 +21,6 @@ pub struct PhysicalResource {
     pub resource: ResourceType,
     
     pub current_layout: vk::ImageLayout,
-    pub current_access: vk::AccessFlags2,
     pub current_stage: vk::PipelineStageFlags2,
     pub current_queue_family: u32,
 }
@@ -33,7 +32,6 @@ impl PhysicalResource {
             name,
             resource: ResourceType::SwapchainImage(image),
             current_layout: vk::ImageLayout::UNDEFINED,
-            current_access: vk::AccessFlags2::NONE,
             current_stage: vk::PipelineStageFlags2::NONE,
             current_queue_family: vk::QUEUE_FAMILY_IGNORED,
         }
@@ -45,7 +43,6 @@ impl PhysicalResource {
             name,
             resource: ResourceType::Image(images),
             current_layout: vk::ImageLayout::UNDEFINED,
-            current_access: vk::AccessFlags2::NONE,
             current_stage: vk::PipelineStageFlags2::NONE,
             current_queue_family: vk::QUEUE_FAMILY_IGNORED,
         }
@@ -57,7 +54,6 @@ impl PhysicalResource {
             name,
             resource: ResourceType::Buffer(buffers),
             current_layout: vk::ImageLayout::UNDEFINED,
-            current_access: vk::AccessFlags2::NONE,
             current_stage: vk::PipelineStageFlags2::NONE,
             current_queue_family: vk::QUEUE_FAMILY_IGNORED,
         }

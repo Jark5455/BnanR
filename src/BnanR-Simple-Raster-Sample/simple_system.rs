@@ -4,20 +4,22 @@ use anyhow::*;
 use ash::*;
 use cgmath::*;
 
-use BnanR::core::{ArcMut, make_arcmut};
+use BnanR::core::{ArcMut, make_arcmut, RcMut};
 use BnanR::core::bnan_buffer::BnanBuffer;
 use BnanR::core::bnan_camera::BnanCamera;
 use BnanR::core::bnan_descriptors::*;
-use BnanR::core::bnan_device::BnanDevice;
+use BnanR::core::bnan_device::{BnanBarrierBuilder, BnanDevice, WorkQueue};
 use BnanR::core::bnan_image::BnanImage;
+use BnanR::core::bnan_mesh::BnanMesh;
 use BnanR::core::bnan_pipeline::{BnanPipeline, GraphicsPipelineConfigInfo};
 use BnanR::core::bnan_rendering::{BnanFrameInfo, FRAMES_IN_FLIGHT};
 use BnanR::core::bnan_window::WindowObserver;
 use BnanR::core::bnan_render_graph::graph::BnanRenderGraph;
 use BnanR::core::bnan_render_graph::resource::ResourceHandle;
+use BnanR::fs::bpk::BpkArchive;
 
-const SIMPLE_MESH_FILEPATH: &str = "./build/BnanR-Sample-Shaders/simple-raster-mesh.mesh.spv";
-const SIMPLE_FRAG_FILEPATH: &str = "./build/BnanR-Sample-Shaders/simple-raster-mesh.frag.spv";
+const SIMPLE_VERT_FILEPATH: &str = "./build/BnanR-Sample-Shaders/simple-raster.vert.spv";
+const SIMPLE_FRAG_FILEPATH: &str = "./build/BnanR-Sample-Shaders/simple-raster.frag.spv";
 
 
 #[repr(C)]
@@ -36,6 +38,7 @@ pub struct SimpleSystem {
     pub ubo_buffers: [BnanBuffer; FRAMES_IN_FLIGHT],
     pub depth_images: [ArcMut<BnanImage>; FRAMES_IN_FLIGHT],
     pub color_images: [ArcMut<BnanImage>; FRAMES_IN_FLIGHT],
+    pub mesh: BnanMesh,
     pub descriptor_sets: [vk::DescriptorSet; FRAMES_IN_FLIGHT],
     pub pipeline: BnanPipeline,
 }
@@ -53,9 +56,8 @@ impl WindowObserver<(i32, i32)> for SimpleSystem {
             .width(width as u32)
             .height(height as u32);
 
-        self.depth_images = Self::create_depth_images(self.device.clone(), extent).unwrap();
-        self.color_images = Self::create_color_images(self.device.clone(), extent).unwrap();
-        
+        (self.depth_images, self.color_images) = Self::create_framebuffer_images(self.device.clone(), extent).unwrap();
+
         self.render_graph.lock().unwrap().update_render_image(&self.depth_handle, self.depth_images.clone());
         self.render_graph.lock().unwrap().update_render_image(&self.color_handle, self.color_images.clone());
 
@@ -74,9 +76,10 @@ impl SimpleSystem {
         }
 
         let ubo_buffers = Self::create_uniform_buffers(device.clone())?;
-        let depth_images = Self::create_depth_images(device.clone(), swapchain_extent)?;
-        let color_images = Self::create_color_images(device.clone(), swapchain_extent)?;
-        
+        let (depth_images, color_images) = Self::create_framebuffer_images(device.clone(), swapchain_extent)?;
+
+        let mesh = Self::load_mesh(device.clone(), "./build/assets.bpk", "assets/ceramic_vase_01_4k.blend")?;
+
         let depth_handle = render_graph.lock().unwrap().import_render_image("DepthBuffer", depth_images.clone());
         let color_handle = render_graph.lock().unwrap().import_render_image("Color", color_images.clone());
         
@@ -96,18 +99,34 @@ impl SimpleSystem {
             ubo_buffers,
             depth_images,
             color_images,
+            mesh,
             descriptor_sets,
             pipeline,
         })
     }
 
-    pub fn update_uniform_buffers(&mut self, frame_info: &BnanFrameInfo, camera: &BnanCamera) -> Result<()> {
+    pub fn load_mesh(device: ArcMut<BnanDevice>, archive_path: &str, mesh_path: &str) -> Result<BnanMesh> {
+        let archive = BpkArchive::open(archive_path)?;
 
-        let ubo = SimpleUBO { projection: camera.projection_matrix, view: camera.view_matrix };
+        let positions_path = format!("{}/positions", mesh_path);
+        let (_, positions) = archive.load_buffer(&positions_path)?;
+
+        let vertices_path = format!("{}/vertices", mesh_path);
+        let (_, vertices) = archive.load_buffer(&vertices_path)?;
+
+        let indices_path = format!("{}/indices", mesh_path);
+        let (_, indices) = archive.load_buffer(&indices_path)?;
+
+        Ok(BnanMesh::new(device.clone(), &positions, &vertices, &indices)?)
+    }
+    
+    pub fn update_uniform_buffers(&mut self, frame_info: &BnanFrameInfo, camera: RcMut<BnanCamera>) -> Result<()> {
+
+        let ubo = SimpleUBO { projection: camera.borrow().projection_matrix, view: camera.borrow().view_matrix };
         let data = unsafe { std::slice::from_raw_parts::<u8>(&ubo as *const SimpleUBO as *const u8, size_of::<SimpleUBO>()) };
 
         self.ubo_buffers[frame_info.frame_index].write_to_buffer(data, 0)?;
-        self.ubo_buffers[frame_info.frame_index].flush(vk::WHOLE_SIZE, 0)?;
+        self.ubo_buffers[frame_info.frame_index].flush(size_of::<SimpleUBO>() as vk::DeviceSize, 0)?;
 
         Ok(())
     }
@@ -142,11 +161,10 @@ impl SimpleSystem {
 
             device_guard.device.cmd_bind_pipeline(frame_info.main_command_buffer, vk::PipelineBindPoint::GRAPHICS, self.pipeline.pipeline);
             device_guard.device.cmd_bind_descriptor_sets(frame_info.main_command_buffer, vk::PipelineBindPoint::GRAPHICS, self.pipeline.pipeline_layout, 0, &[self.descriptor_sets[frame_info.frame_index]], &[]);
-            
-            // Mesh shaders require cmd_draw_mesh_tasks instead of cmd_draw
-            let mesh_shader = ext::mesh_shader::Device::new(&device_guard.instance, &device_guard.device);
-            mesh_shader.cmd_draw_mesh_tasks(frame_info.main_command_buffer, 1, 1, 1);
         }
+
+        self.mesh.bind_all(frame_info.main_command_buffer);
+        self.mesh.draw(frame_info.main_command_buffer);
     }
     
     fn create_uniform_buffers(device: ArcMut<BnanDevice>) -> Result<[BnanBuffer; FRAMES_IN_FLIGHT]> {
@@ -163,8 +181,10 @@ impl SimpleSystem {
         Ok(buffers)
     }
 
-    fn create_depth_images(device: ArcMut<BnanDevice>, extent: vk::Extent2D) -> Result<[ArcMut<BnanImage>; FRAMES_IN_FLIGHT]> {
-        let format = device.lock().unwrap().find_depth_format()?;
+    fn create_framebuffer_images(device: ArcMut<BnanDevice>, extent: vk::Extent2D) -> Result<([ArcMut<BnanImage>; FRAMES_IN_FLIGHT], [ArcMut<BnanImage>; FRAMES_IN_FLIGHT])> {
+        let depth_format = device.lock().unwrap().find_depth_format()?;
+        let color_format = vk::Format::B8G8R8A8_SRGB;
+
         let sample_count = device.lock().unwrap().msaa_samples;
 
         let extent = vk::Extent3D::default()
@@ -172,34 +192,46 @@ impl SimpleSystem {
             .height(extent.height)
             .depth(1);
 
-        let vec: Result<Vec<_>> = (0..FRAMES_IN_FLIGHT).map(|_|
-            Ok(make_arcmut(BnanImage::new(device.clone(), format, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT, extent, sample_count)?))
+        let depth_vec: Result<Vec<_>> = (0..FRAMES_IN_FLIGHT).map(|_|
+            Ok(make_arcmut(BnanImage::new(device.clone(), depth_format, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT, vk::MemoryPropertyFlags::DEVICE_LOCAL, extent, sample_count)?))
         ).collect();
 
-        let images = vec?.try_into().map_err(|_| anyhow!("something went wrong while creating depth images"))?;
-        Ok(images)
-    }
+        let depth_images: [ArcMut<BnanImage>; FRAMES_IN_FLIGHT] = depth_vec?.try_into().map_err(|_| anyhow!("something went wrong while creating depth images"))?;
 
-    fn create_color_images(device: ArcMut<BnanDevice>, extent: vk::Extent2D) -> Result<[ArcMut<BnanImage>; FRAMES_IN_FLIGHT]> {
-        let format = vk::Format::B8G8R8A8_SRGB;
-        let sample_count = device.lock().unwrap().msaa_samples;
-
-        let extent = vk::Extent3D::default()
-            .width(extent.width)
-            .height(extent.height)
-            .depth(1);
-
-        let vec: Result<Vec<_>> = (0..FRAMES_IN_FLIGHT).map(|_|
-            Ok(make_arcmut(BnanImage::new(device.clone(), format, vk::ImageUsageFlags::COLOR_ATTACHMENT, extent, sample_count)?))
+        let color_vec: Result<Vec<_>> = (0..FRAMES_IN_FLIGHT).map(|_|
+            Ok(make_arcmut(BnanImage::new(device.clone(), color_format, vk::ImageUsageFlags::COLOR_ATTACHMENT, vk::MemoryPropertyFlags::DEVICE_LOCAL, extent, sample_count)?))
         ).collect();
 
-        let images = vec?.try_into().map_err(|_| anyhow!("something went wrong while creating depth images"))?;
-        Ok(images)
+        let color_images: [ArcMut<BnanImage>; FRAMES_IN_FLIGHT] = color_vec?.try_into().map_err(|_| anyhow!("something went wrong while creating depth images"))?;
+
+        unsafe {
+            let device_guard = device.lock().unwrap();
+            let fence = device_guard.device.create_fence(&vk::FenceCreateInfo::default(), None)?;
+
+            let command_buffer = device_guard.begin_commands(WorkQueue::GRAPHICS, 1)?[0];
+
+            let mut builder = BnanBarrierBuilder::new();
+
+            for image in &depth_images {
+                builder.transition_image_layout(image.lock().unwrap().image, vk::ImageLayout::UNDEFINED, vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL, None, None, None)?;
+            }
+
+            for image in &color_images {
+                builder.transition_image_layout(image.lock().unwrap().image, vk::ImageLayout::UNDEFINED, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, None, None, None)?;
+            }
+
+            builder.record(&*device_guard, command_buffer);
+
+            device_guard.submit_commands(WorkQueue::GRAPHICS, vec![command_buffer], None, Some(fence))?;
+            device_guard.device.wait_for_fences(&[fence], true, u64::MAX)?;
+        }
+
+        Ok((depth_images, color_images))
     }
 
     fn create_descriptor_set_layout(device: ArcMut<BnanDevice>) -> Result<BnanDescriptorSetLayout> {
         BnanDescriptorSetLayoutBuilder::new(vk::DescriptorSetLayoutCreateFlags::empty())
-            .add_binding(0, vk::DescriptorType::UNIFORM_BUFFER, vk::ShaderStageFlags::MESH_EXT | vk::ShaderStageFlags::FRAGMENT)
+            .add_binding(0, vk::DescriptorType::UNIFORM_BUFFER, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
 //            .add_binding(1, vk::DescriptorType::COMBINED_IMAGE_SAMPLER, vk::ShaderStageFlags::FRAGMENT)
 //            .add_binding(2, vk::DescriptorType::COMBINED_IMAGE_SAMPLER, vk::ShaderStageFlags::FRAGMENT)
 //            .add_binding(3, vk::DescriptorType::COMBINED_IMAGE_SAMPLER, vk::ShaderStageFlags::FRAGMENT)
@@ -289,6 +321,6 @@ impl SimpleSystem {
         pipeline_config_info.multisample_info.rasterization_samples = device.lock().unwrap().msaa_samples;
         pipeline_config_info.pipeline_layout = pipeline_layout;
 
-         Ok(BnanPipeline::new_graphics_pipeline(device, SIMPLE_MESH_FILEPATH.to_owned(), SIMPLE_FRAG_FILEPATH.to_owned(), &mut pipeline_config_info)?)
+         Ok(BnanPipeline::new_traditional_graphics_pipeline(device, SIMPLE_VERT_FILEPATH.to_owned(), SIMPLE_FRAG_FILEPATH.to_owned(), &mut pipeline_config_info)?)
     }
 }

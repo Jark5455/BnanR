@@ -40,6 +40,12 @@ pub struct BnanDevice {
     pub allocator: Allocator,
 }
 
+pub enum WorkQueue {
+    GRAPHICS,
+    COMPUTE,
+    TRANSFER
+}
+
 #[derive(Copy, Clone)]
 pub struct QueueIndices {
     pub graphics_family: Option<u32>,
@@ -116,7 +122,6 @@ impl BnanBarrierBuilder {
     
     pub fn transition_image_layout(
         &mut self,
-        device: &BnanDevice,
         image: vk::Image,
         old_layout: vk::ImageLayout,
         new_layout: vk::ImageLayout,
@@ -124,52 +129,12 @@ impl BnanBarrierBuilder {
         levels: Option<u32>,
         layers: Option<u32>,
     ) -> Result<&mut Self> {
-        let barrier = device.build_image_transition_barrier(
+        let barrier = BnanDevice::build_image_transition_barrier(
             image, old_layout, new_layout, undefined_exec_stage, levels, layers
         )?;
+
         self.image_barriers.push(barrier);
         Ok(self)
-    }
-    
-    pub fn transition_image_layout_raw(
-        &mut self,
-        image: vk::Image,
-        old_layout: vk::ImageLayout,
-        new_layout: vk::ImageLayout,
-        src_stage: vk::PipelineStageFlags2,
-        src_access: vk::AccessFlags2,
-        dst_stage: vk::PipelineStageFlags2,
-        dst_access: vk::AccessFlags2,
-        levels: Option<u32>,
-        layers: Option<u32>,
-    ) -> &mut Self {
-        let aspect_mask = if new_layout == vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL {
-            vk::ImageAspectFlags::DEPTH
-        } else {
-            vk::ImageAspectFlags::COLOR
-        };
-        
-        let subresource_range = vk::ImageSubresourceRange::default()
-            .aspect_mask(aspect_mask)
-            .base_mip_level(0)
-            .level_count(levels.unwrap_or(1))
-            .base_array_layer(0)
-            .layer_count(layers.unwrap_or(1));
-        
-        let barrier = vk::ImageMemoryBarrier2::default()
-            .old_layout(old_layout)
-            .new_layout(new_layout)
-            .image(image)
-            .subresource_range(subresource_range)
-            .src_access_mask(src_access)
-            .src_stage_mask(src_stage)
-            .dst_access_mask(dst_access)
-            .dst_stage_mask(dst_stage)
-            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED);
-        
-        self.image_barriers.push(barrier);
-        self
     }
     
     pub fn flush_writes(
@@ -216,50 +181,16 @@ impl BnanBarrierBuilder {
         self.image_barriers.is_empty()
     }
     
-    pub fn record_sync(&mut self, device: &BnanDevice, command_buffer: vk::CommandBuffer) {
+    pub fn record(&mut self, device: &BnanDevice, command_buffer: vk::CommandBuffer) {
         if self.image_barriers.is_empty() {
             return;
         }
-        
-        device.record_image_barriers(command_buffer, &self.image_barriers);
+
+        let dependency_info =  vk::DependencyInfo::default()
+            .image_memory_barriers(&self.image_barriers);
+
+        unsafe { device.device.cmd_pipeline_barrier2(command_buffer, &dependency_info) };
         self.image_barriers.clear();
-    }
-    
-    pub fn record_async(&mut self, device: &BnanDevice) -> Result<()> {
-        if self.image_barriers.is_empty() {
-            return Ok(());
-        }
-        
-        let command_pool = device.command_pools[BnanDevice::COMPUTE_COMMAND_POOL];
-        
-        let alloc_info = vk::CommandBufferAllocateInfo::default()
-            .command_pool(command_pool)
-            .command_buffer_count(1)
-            .level(vk::CommandBufferLevel::PRIMARY);
-        
-        let command_buffer = unsafe { device.device.allocate_command_buffers(&alloc_info)?[0] };
-        let begin_info = vk::CommandBufferBeginInfo::default();
-        
-        unsafe {
-            device.device.reset_command_buffer(command_buffer, vk::CommandBufferResetFlags::empty())?;
-            device.device.begin_command_buffer(command_buffer, &begin_info)?;
-        }
-        
-        device.record_image_barriers(command_buffer, &self.image_barriers);
-        
-        let command_buffers = [command_buffer];
-        let submit_info = [
-            vk::SubmitInfo::default()
-                .command_buffers(&command_buffers)
-        ];
-        
-        unsafe {
-            device.device.end_command_buffer(command_buffer)?;
-            device.device.queue_submit(device.compute_queue, &submit_info, vk::Fence::null())?;
-        }
-        
-        self.image_barriers.clear();
-        Ok(())
     }
 }
 
@@ -330,86 +261,63 @@ impl BnanDevice {
         )
     }
 
+    pub fn begin_commands(&self, work_queue: WorkQueue, num_command_buffers: u32) -> Result<Vec<vk::CommandBuffer>> {
+        let command_pool = match work_queue {
+            WorkQueue::GRAPHICS => self.command_pools[Self::GRAPHICS_COMMAND_POOL],
+            WorkQueue::COMPUTE => self.command_pools[Self::COMPUTE_COMMAND_POOL],
+            WorkQueue::TRANSFER => self.command_pools[Self::TRANSFER_COMMAND_POOL],
+        };
+
+        let info = vk::CommandBufferAllocateInfo::default()
+            .command_buffer_count(num_command_buffers)
+            .command_pool(command_pool)
+            .level(vk::CommandBufferLevel::PRIMARY);
+
+        let command_buffers = unsafe { self.device.allocate_command_buffers(&info)? };
+
+        let begin_info = vk::CommandBufferBeginInfo::default();
+
+        for command_buffer in &command_buffers {
+            unsafe {
+                self.device.begin_command_buffer(command_buffer.clone(), &begin_info)?;
+            }
+        }
+
+        Ok(command_buffers)
+    }
+
+    pub fn submit_commands(&self, work_queue: WorkQueue, command_buffers: Vec<vk::CommandBuffer>, semaphores: Option<&[vk::SemaphoreSubmitInfo]>, fence: Option<vk::Fence>) -> Result<()> {
+
+        let queue = match work_queue {
+            WorkQueue::GRAPHICS => self.graphics_queue,
+            WorkQueue::COMPUTE => self.compute_queue,
+            WorkQueue::TRANSFER => self.transfer_queue,
+        };
+
+        for command_buffer in &command_buffers {
+            unsafe {
+                self.device.end_command_buffer(command_buffer.clone())?;
+            }
+        }
+
+        let command_buffer_infos = command_buffers.iter().map(|command_buffer| vk::CommandBufferSubmitInfo::default().command_buffer(command_buffer.clone())).collect::<Vec<_>>();
+
+        let submit_info = [vk::SubmitInfo2::default()
+            .signal_semaphore_infos(semaphores.unwrap_or_default())
+            .command_buffer_infos(&command_buffer_infos)
+        ];
+
+        unsafe { self.device.queue_submit2(queue, &submit_info, fence.unwrap_or_default())? };
+        Ok(())
+    }
+
     pub fn get_physical_device_properties(&self) -> vk::PhysicalDeviceProperties2<'_> {
         let mut properties = vk::PhysicalDeviceProperties2::default();
         unsafe { self.instance.get_physical_device_properties2(self.physical_device, &mut properties) };
         properties
     }
     
-    pub fn flush_writes(&self, command_buffer: vk::CommandBuffer, image: vk::Image, layout: vk::ImageLayout, src_access_mask: vk::AccessFlags2, dst_access_mask: vk::AccessFlags2, src_stage_mask: vk::PipelineStageFlags2, dst_stage_mask: vk::PipelineStageFlags2, levels: Option<u32>, layers: Option<u32>) {
-        let aspect_mask = match layout == vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL {
-            true => {vk::ImageAspectFlags::DEPTH}
-            false => {vk::ImageAspectFlags::COLOR}
-        };
-
-        let subresource_range = vk::ImageSubresourceRange::default()
-            .aspect_mask(aspect_mask)
-            .base_mip_level(0)
-            .level_count(levels.unwrap_or(1))
-            .base_array_layer(0)
-            .layer_count(layers.unwrap_or(1));
-
-        let barrier = [
-            vk::ImageMemoryBarrier2::default()
-                .old_layout(layout)
-                .new_layout(layout)
-                .image(image)
-                .subresource_range(subresource_range)
-                .src_access_mask(src_access_mask)
-                .src_stage_mask(src_stage_mask)
-                .dst_access_mask(dst_access_mask)
-                .dst_stage_mask(dst_stage_mask)
-                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-        ];
-
-        let dependency_info = vk::DependencyInfo::default()
-            .image_memory_barriers(&barrier);
-
-        unsafe {
-            self.device.cmd_pipeline_barrier2(command_buffer, &dependency_info);
-        }
-    }
-    
-    pub fn transition_image_layout_async(&self, image: vk::Image, old_layout: vk::ImageLayout, new_layout: vk::ImageLayout, undefined_exec_stage: Option<vk::PipelineStageFlags2>, levels: Option<u32>, layers: Option<u32>) -> Result<()> {
-        let command_pool = self.command_pools[Self::COMPUTE_COMMAND_POOL];
-
-        let command_buffer_info = vk::CommandBufferAllocateInfo::default()
-            .command_pool(command_pool)
-            .command_buffer_count(1)
-            .level(vk::CommandBufferLevel::PRIMARY);
-
-        let command_buffer= unsafe { self.device.allocate_command_buffers(&command_buffer_info)?[0] };
-        let command_buffer_begin_info = vk::CommandBufferBeginInfo::default();
-
-        unsafe {
-            self.device.reset_command_buffer(command_buffer, vk::CommandBufferResetFlags::empty())?;
-            self.device.begin_command_buffer(command_buffer, &command_buffer_begin_info)?;
-        }
-
-        self.transition_image_layout_sync(command_buffer, image, old_layout, new_layout, undefined_exec_stage, levels, layers)?;
-
-        let command_buffers = [command_buffer];
-        let submit_info = [
-            vk::SubmitInfo::default()
-            .command_buffers(&command_buffers)
-        ];
-
-        unsafe {
-            self.device.end_command_buffer(command_buffer)?;
-            self.device.queue_submit(self.compute_queue, &submit_info, vk::Fence::null())?;
-        }
-        
-        Ok(())
-    }
-    
-    pub fn transition_image_layout_sync(&self, command_buffer: vk::CommandBuffer, image: vk::Image, old_layout: vk::ImageLayout, new_layout: vk::ImageLayout, undefined_exec_stage: Option<vk::PipelineStageFlags2>, levels: Option<u32>, layers: Option<u32>) -> Result<()> {
-        let barrier = self.build_image_transition_barrier(image, old_layout, new_layout, undefined_exec_stage, levels, layers)?;
-        self.record_image_barriers(command_buffer, &[barrier]);
-        Ok(())
-    }
-    
-    pub fn build_image_transition_barrier(&self, image: vk::Image, old_layout: vk::ImageLayout, new_layout: vk::ImageLayout, undefined_exec_stage: Option<vk::PipelineStageFlags2>, levels: Option<u32>, layers: Option<u32>) -> Result<vk::ImageMemoryBarrier2<'static>> {
+    pub fn build_image_transition_barrier(image: vk::Image, old_layout: vk::ImageLayout, new_layout: vk::ImageLayout, undefined_exec_stage: Option<vk::PipelineStageFlags2>, levels: Option<u32>, layers: Option<u32>) -> Result<vk::ImageMemoryBarrier2<'static>> {
 
         let aspect_mask = match new_layout == vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL {
             true => {vk::ImageAspectFlags::DEPTH}
@@ -455,19 +363,6 @@ impl BnanDevice {
             .dst_stage_mask(dst_stage_mask)
             .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED))
-    }
-    
-    pub fn record_image_barriers(&self, command_buffer: vk::CommandBuffer, barriers: &[vk::ImageMemoryBarrier2]) {
-        if barriers.is_empty() {
-            return;
-        }
-        
-        let dependency_info = vk::DependencyInfo::default()
-            .image_memory_barriers(barriers);
-
-        unsafe {
-            self.device.cmd_pipeline_barrier2(command_buffer, &dependency_info);
-        }
     }
 
     pub fn get_swapchain_support(&self) -> Result<SwapChainSupportDetails> {
@@ -694,18 +589,22 @@ impl BnanDevice {
             return Ok(false);
         }
 
-        let mut features2 = vk::PhysicalDeviceFeatures2::default();
         let mut descriptor_indexing_features = vk::PhysicalDeviceDescriptorIndexingFeatures::default();
         let mut synchronization2_features = vk::PhysicalDeviceSynchronization2Features::default();
         let mut dynamic_rendering_features = vk::PhysicalDeviceDynamicRenderingFeatures::default();
         let mut mesh_shader_features = vk::PhysicalDeviceMeshShaderFeaturesEXT::default();
+        let mut storage_8bit_features = vk::PhysicalDevice8BitStorageFeaturesKHR::default();
+        let mut scalar_block_layout_features = vk::PhysicalDeviceScalarBlockLayoutFeaturesEXT::default();
+
+        let mut features2 = vk::PhysicalDeviceFeatures2::default()
+            .push_next(&mut descriptor_indexing_features)
+            .push_next(&mut synchronization2_features)
+            .push_next(&mut dynamic_rendering_features)
+            .push_next(&mut mesh_shader_features)
+            .push_next(&mut storage_8bit_features)
+            .push_next(&mut scalar_block_layout_features);
 
         unsafe {
-            features2.p_next = std::mem::transmute(&mut descriptor_indexing_features);
-            descriptor_indexing_features.p_next = std::mem::transmute(&mut synchronization2_features);
-            synchronization2_features.p_next = std::mem::transmute(&mut dynamic_rendering_features);
-            dynamic_rendering_features.p_next = std::mem::transmute(&mut mesh_shader_features);
-
             instance.get_physical_device_features2(device, &mut features2);
         }
 
@@ -716,7 +615,9 @@ impl BnanDevice {
             synchronization2_features.synchronization2 == vk::TRUE &&
             dynamic_rendering_features.dynamic_rendering == vk::TRUE &&
             mesh_shader_features.mesh_shader == vk::TRUE &&
-            mesh_shader_features.task_shader == vk::TRUE
+            mesh_shader_features.task_shader == vk::TRUE &&
+            storage_8bit_features.storage_buffer8_bit_access == vk::TRUE &&
+            scalar_block_layout_features.scalar_block_layout == vk::TRUE
         )
     }
 
@@ -808,6 +709,12 @@ impl BnanDevice {
             .mesh_shader(true)
             .task_shader(true);
 
+        let mut storage_buffer_8bit = vk::PhysicalDevice8BitStorageFeaturesKHR::default()
+            .storage_buffer8_bit_access(true);
+
+        let mut scalar_block_layout_features = vk::PhysicalDeviceScalarBlockLayoutFeaturesEXT::default()
+            .scalar_block_layout(true);
+
         let extensions: Vec<_> = DEVICE_EXTENSIONS.iter().map(|s| s.as_ptr()).collect();
 
         let info = vk::DeviceCreateInfo::default()
@@ -817,7 +724,9 @@ impl BnanDevice {
             .push_next(&mut synchronization2_features)
             .push_next(&mut descriptor_indexing_features)
             .push_next(&mut dynamic_rendering_features)
-            .push_next(&mut mesh_shading_features);
+            .push_next(&mut mesh_shading_features)
+            .push_next(&mut storage_buffer_8bit)
+            .push_next(&mut scalar_block_layout_features);
 
         unsafe {
             Ok(instance.create_device(device, &info, None)?)

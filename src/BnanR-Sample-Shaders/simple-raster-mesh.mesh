@@ -1,22 +1,81 @@
 #version 460
 #extension GL_EXT_mesh_shader : require
+#extension GL_EXT_shader_8bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_EXT_scalar_block_layout : require
 
-layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
-layout(triangles, max_vertices = 3, max_primitives = 1) out;
+layout(local_size_x = 124, local_size_y = 1, local_size_z = 1) in;
+layout(triangles, max_vertices = 64, max_primitives = 124) out;
 
 layout(location = 0) out vec4 v_color[];
 
+struct Vertex {
+    vec3 normal;
+    vec3 tangent;
+    vec2 uv;
+};
+
+struct MeshletData {
+    uint position_offset;
+    uint vertex_offset;
+    uint vertex_count;
+    uint triangle_offset;
+    uint triangle_count;
+};
+
+layout(set = 0, binding = 0) uniform UBO {
+    mat4 projection;
+    mat4 view;
+} ubo;
+
+layout(scalar, set = 0, binding = 1) readonly buffer GlobalPosition {
+    vec3 positions[];
+} global_position;
+
+layout(scalar, set = 0, binding = 2) readonly buffer GlobalVertex {
+    Vertex vertices[];
+} global_vertex;
+
+layout(scalar, set = 0, binding = 3) readonly buffer GlobalIndex {
+    uint8_t indices[];
+} global_index;
+
+layout(scalar, set = 0, binding = 4) readonly buffer GlobalMeshletData {
+    MeshletData data[];
+} global_meshlet_data;
+
 void main() {
-    SetMeshOutputsEXT(3, 1);
+    uint meshlet_id = gl_WorkGroupID.x;
+    MeshletData m = global_meshlet_data.data[meshlet_id];
+    SetMeshOutputsEXT(m.vertex_count, m.triangle_count);
 
-    gl_PrimitiveTriangleIndicesEXT[0] = uvec3(0, 1, 2);
+    uint lane_id = gl_LocalInvocationID.x;
 
-    gl_MeshVerticesEXT[0].gl_Position = vec4(-0.5, 0.5, 0.0, 1.0);
-    v_color[0] = vec4(1.0, 0.0, 0.0, 1.0);
+    if (lane_id < m.vertex_count) {
+        // Calculate the global index for this specific vertex
+        // Note: Meshlets usually reference a global vertex buffer directly
+        uint global_vertex_id = (m.position_offset / 12) + lane_id;
+        vec3 pos = global_position.positions[global_vertex_id];
 
-    gl_MeshVerticesEXT[1].gl_Position = vec4(0.5, 0.5, 0.0, 1.0);
-    v_color[1] = vec4(0.0, 1.0, 0.0, 1.0);
+        // Transform
+        gl_MeshVerticesEXT[lane_id].gl_Position = ubo.projection * ubo.view * vec4(pos, 1.0);
 
-    gl_MeshVerticesEXT[2].gl_Position = vec4(0.0, -0.5, 0.0, 1.0);
-    v_color[2] = vec4(0.0, 0.0, 1.0, 1.0);
+        v_color[lane_id] = vec4(1.0, 1.0, 1.0, 1.0);
+    }
+
+    // 5. Parallel Triangle Processing
+    // The same threads loop again to process triangles
+    // (Meshlets have separate Vertex and Primitive counts)
+    if (lane_id < m.triangle_count) {
+        // Calculate where the 3 indices for this triangle start
+        uint global_index_offset = m.triangle_offset + (lane_id * 3);
+
+        // Load 3 consecutive bytes (u8)
+        uint i0 = uint(global_index.indices[global_index_offset + 0]);
+        uint i1 = uint(global_index.indices[global_index_offset + 1]);
+        uint i2 = uint(global_index.indices[global_index_offset + 2]);
+
+        // Output the triangle
+        gl_PrimitiveTriangleIndicesEXT[lane_id] = uvec3(i0, i1, i2);
+    }
 }

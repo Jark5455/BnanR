@@ -1,7 +1,9 @@
 mod simple_system;
+mod meshlet_system;
 
 use ash::*;
-
+use cgmath::num_traits::FloatConst;
+use cgmath::Vector3;
 use BnanR::core::{make_arcmut, make_rcmut};
 use BnanR::core::bnan_camera::BnanCamera;
 use BnanR::core::bnan_device::BnanDevice;
@@ -10,7 +12,7 @@ use BnanR::core::bnan_window::{BnanWindow, WindowObserver};
 use BnanR::core::bnan_render_graph::graph::BnanRenderGraph;
 use BnanR::core::bnan_render_graph::pass::RenderPass;
 use BnanR::core::bnan_render_graph::pass::RenderPassResource;
-
+use crate::meshlet_system::MeshletSystem;
 use crate::simple_system::SimpleSystem;
 
 struct Quit {
@@ -35,21 +37,35 @@ fn main() {
 
     let render_graph = make_arcmut(BnanRenderGraph::new(window.clone(), device.clone(), swapchain.clone()).unwrap());
 
-    let camera = BnanCamera::new();
-    let simple_system = make_rcmut(SimpleSystem::new(device.clone(), render_graph.clone()).unwrap());
+    let mut camera = make_rcmut(BnanCamera::new());
+
+    let aspect = window.lock().unwrap().get_aspect_ratio();
+    camera.borrow_mut().set_orthographic_projection(aspect, -1.0, 1.0, -1.0, 1.0);
+    camera.borrow_mut().set_perspective_projection(f32::PI() / 2.0, aspect, 0.1, 10.0);
+    camera.borrow_mut().set_view(Vector3 {x: 0.0, y: 0.0, z: -2.0}, Vector3 {x: 0.0, y: 0.0, z: 0.0});
+
+    // let system = make_rcmut(SimpleSystem::new(device.clone(), render_graph.clone()).unwrap());
+
+
+    let mut system = make_rcmut(MeshletSystem::new(device.clone(), render_graph.clone()).unwrap());
+    system.borrow_mut().load_meshlet_mesh("./build/assets2.bpk", "assets/ceramic_vase_01_4k.blend").unwrap();
+    system.borrow_mut().update_meshlet_data().unwrap();
 
     {
         let mut window_guard = window.lock().unwrap();
 
         window_guard.register_quit_observer(quit.clone());
         window_guard.register_atomic_resize_observer(swapchain.clone());
-        window_guard.register_resize_observer(simple_system.clone());
+        window_guard.register_resize_observer(system.clone());
+        window_guard.register_mouse_observer(camera.clone());
+        window_guard.register_keyboard_observer(camera.clone());
+        window_guard.register_resize_observer(camera.clone());
     }
 
     let backbuffer = render_graph.lock().unwrap().get_backbuffer_handle();
 
-    let depth_handle = simple_system.borrow().depth_handle.clone();
-    let color_handle = simple_system.borrow().color_handle.clone();
+    let depth_handle = system.borrow().depth_handle.clone();
+    let color_handle = system.borrow().color_handle.clone();
 
     let pass = RenderPass::new(
         "Main Render Pass".to_string(),
@@ -57,14 +73,12 @@ fn main() {
         vec![
             RenderPassResource {
                 handle: depth_handle,
-                access: vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
                 stage: vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS,
                 layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
                 resolve_target: None,
             },
             RenderPassResource {
                 handle: color_handle,
-                access: vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
                 stage: vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
                 layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
                 resolve_target: Some(backbuffer),
@@ -72,8 +86,9 @@ fn main() {
         ],
 
         Box::new(move |_cmd, frame_info| {
-            simple_system.borrow_mut().update_uniform_buffers(frame_info, &camera).unwrap();
-            simple_system.borrow().draw(frame_info);
+            camera.borrow_mut().move_in_xz(frame_info.frame_time / 1000.0);
+            system.borrow_mut().update_uniform_buffers(frame_info, camera.clone()).unwrap();
+            system.borrow().draw(frame_info);
         })
     );
 

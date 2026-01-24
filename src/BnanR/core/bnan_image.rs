@@ -30,8 +30,8 @@ impl Drop for BnanImage {
 }
 
 impl BnanImage {
-    pub fn new(device: ArcMut<BnanDevice>, format: vk::Format, usage: vk::ImageUsageFlags, image_extent: vk::Extent3D, sample_count: vk::SampleCountFlags) -> Result<BnanImage> {
-        let (image, image_allocation) = Self::create_image(device.clone(), format, usage, image_extent, sample_count)?;
+    pub fn new(device: ArcMut<BnanDevice>, format: vk::Format, usage: vk::ImageUsageFlags, properties: vk::MemoryPropertyFlags, image_extent: vk::Extent3D, sample_count: vk::SampleCountFlags) -> Result<BnanImage> {
+        let (image, image_allocation) = Self::create_image(device.clone(), format, usage, properties, image_extent, sample_count)?;
 
         let image_aspect = match format {
             vk::Format::D32_SFLOAT => vk::ImageAspectFlags::DEPTH,
@@ -66,7 +66,7 @@ impl BnanImage {
         }
     }
 
-    fn create_image(device: ArcMut<BnanDevice>, format: vk::Format, usage: vk::ImageUsageFlags, extent: vk::Extent3D, sample_count: vk::SampleCountFlags) -> Result<(vk::Image, Allocation)> {
+    fn create_image(device: ArcMut<BnanDevice>, format: vk::Format, usage: vk::ImageUsageFlags, properties: vk::MemoryPropertyFlags, extent: vk::Extent3D, sample_count: vk::SampleCountFlags) -> Result<(vk::Image, Allocation)> {
         let info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(format)
@@ -78,11 +78,11 @@ impl BnanImage {
             .usage(usage);
 
         let allocation_info = AllocationCreateInfo {
-            required_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            required_flags: properties,
             usage: MemoryUsage::Auto,
             ..Default::default()
         };
-        
+
         unsafe { Ok(device.lock().unwrap().allocator.create_image(&info, &allocation_info)?) }
     }
 

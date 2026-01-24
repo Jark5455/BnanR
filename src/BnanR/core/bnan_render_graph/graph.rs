@@ -6,7 +6,7 @@ use anyhow::*;
 use ash::*;
 
 use crate::core::{make_arcmut, ArcMut};
-use crate::core::bnan_device::BnanDevice;
+use crate::core::bnan_device::{BnanBarrierBuilder, BnanDevice};
 use crate::core::bnan_swapchain::BnanSwapchain;
 use crate::core::bnan_window::BnanWindow;
 use crate::core::bnan_rendering::{BnanFrameInfo, FRAMES_IN_FLIGHT}; 
@@ -179,7 +179,6 @@ impl BnanRenderGraph {
         if let Some(physical) = self.resources.get_mut(&handle.0) {
             physical.resource = ResourceType::Image(images);
             physical.current_layout = vk::ImageLayout::UNDEFINED;
-            physical.current_access = vk::AccessFlags2::NONE;
             physical.current_stage = vk::PipelineStageFlags2::NONE;
         }
     }
@@ -257,7 +256,6 @@ impl BnanRenderGraph {
             name: "Backbuffer".to_string(),
             resource: ResourceType::SwapchainImage(swapchain_resource_image.clone()),
             current_layout: vk::ImageLayout::UNDEFINED,
-            current_access: vk::AccessFlags2::NONE,
             current_stage: vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
             current_queue_family: vk::QUEUE_FAMILY_IGNORED,
         };
@@ -286,9 +284,9 @@ impl BnanRenderGraph {
 
         for pass in &self.passes {
              let device = self.device.lock().unwrap();
-             let mut barrier_builder = crate::core::bnan_device::BnanBarrierBuilder::new();
+             let mut barrier_builder = BnanBarrierBuilder::new();
              
-             let mut process_resource = |handle: &ResourceHandle, required_access, required_stage, required_layout, builder: &mut crate::core::bnan_device::BnanBarrierBuilder| {
+             let mut process_resource = |handle: &ResourceHandle, required_stage, required_layout, builder: &mut BnanBarrierBuilder| {
                  if let Some(physical) = self.resources.get_mut(&handle.0) {
                      let mut needs_barrier = false;
                      
@@ -305,32 +303,12 @@ impl BnanRenderGraph {
                          match &physical.resource {
                              ResourceType::SwapchainImage(image_arc) => {
                                  let image = image_arc.lock().unwrap();
-                                 builder.transition_image_layout_raw(
-                                     image.image,
-                                     physical.current_layout,
-                                     required_layout,
-                                     physical.current_stage,
-                                     physical.current_access,
-                                     required_stage,
-                                     required_access,
-                                     None,
-                                     None,
-                                 );
+                                 builder.transition_image_layout(image.image, physical.current_layout, required_layout, None, None, None).unwrap();
                              },
                              
                              ResourceType::Image(images) => {
                                  let image = images[frame_info.frame_index].lock().unwrap();
-                                 builder.transition_image_layout_raw(
-                                     image.image,
-                                     physical.current_layout,
-                                     required_layout,
-                                     physical.current_stage,
-                                     physical.current_access,
-                                     required_stage,
-                                     required_access,
-                                     None,
-                                     None,
-                                 );
+                                 builder.transition_image_layout(image.image, physical.current_layout, required_layout, None, None, None).unwrap();
                              },
                              
                              ResourceType::Buffer(_) => {
@@ -340,22 +318,20 @@ impl BnanRenderGraph {
                          
                          physical.current_layout = required_layout;
                          physical.current_stage = required_stage;
-                         physical.current_access = required_access;
                      }
                  }
              };
 
              for input in &pass.inputs {
-                 process_resource(&input.handle, input.access, input.stage, input.layout, &mut barrier_builder);
+                 process_resource(&input.handle, input.stage, input.layout, &mut barrier_builder);
              }
              
              for output in &pass.outputs {
-                 process_resource(&output.handle, output.access, output.stage, output.layout, &mut barrier_builder);
+                 process_resource(&output.handle, output.stage, output.layout, &mut barrier_builder);
                  
                  if let Some(resolve_handle) = &output.resolve_target {
                      process_resource(
                          resolve_handle,
-                         vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
                          vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
                          vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
                          &mut barrier_builder
@@ -363,7 +339,7 @@ impl BnanRenderGraph {
                  }
              }
              
-             barrier_builder.record_sync(&device, command_buffer);
+             barrier_builder.record(&device, command_buffer);
              
              drop(device); // Drop lock before execute
              
@@ -485,21 +461,11 @@ impl BnanRenderGraph {
             
             let swapchain_handle = self.swapchain_resource_handle.clone().unwrap();
             let physical = self.resources.get(&swapchain_handle.0).unwrap();
-            
-            let barrier = vk::ImageMemoryBarrier2::default()
-                .src_stage_mask(physical.current_stage)
-                .src_access_mask(physical.current_access)
-                .dst_stage_mask(vk::PipelineStageFlags2::NONE)
-                .dst_access_mask(vk::AccessFlags2::NONE)
-                .old_layout(physical.current_layout)
-                .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
-                .image(swapchain_image)
-                .subresource_range(vk::ImageSubresourceRange::default().aspect_mask(vk::ImageAspectFlags::COLOR).level_count(1).layer_count(1))
-                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED);
 
-            device.record_image_barriers(command_buffer, &[barrier]);
-            
+            let mut builder = BnanBarrierBuilder::new()
+                .transition_image_layout(swapchain_image, physical.current_layout, vk::ImageLayout::PRESENT_SRC_KHR, None, None, None)?
+                .record(&*device, command_buffer);
+
             unsafe {
                 device.device.end_command_buffer(command_buffer)?;
             }

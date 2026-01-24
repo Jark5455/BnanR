@@ -79,7 +79,7 @@ impl<'a> Default for GraphicsPipelineConfigInfo<'a> {
             .rasterizer_discard_enable(false)
             .polygon_mode(vk::PolygonMode::FILL)
             .line_width(1.0)
-            .cull_mode(vk::CullModeFlags::BACK)
+            .cull_mode(vk::CullModeFlags::NONE)
             .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
             .depth_bias_enable(false)
             .depth_bias_constant_factor(0.0)
@@ -157,6 +157,19 @@ impl BnanPipeline {
             pipeline
         })
     }
+
+    pub fn new_traditional_graphics_pipeline(device: ArcMut<BnanDevice>, vertex_shader: String, fragment_shader: String, pipeline_config_info: &mut GraphicsPipelineConfigInfo) -> Result<BnanPipeline> {
+        let vertex_shader_module = Self::load_shader_module(device.clone(), vertex_shader)?;
+        let fragment_shader_module = Self::load_shader_module(device.clone(), fragment_shader)?;
+        let pipeline = Self::create_traditional_graphics_pipeline(device.clone(), vertex_shader_module, fragment_shader_module, pipeline_config_info)?;
+
+        Ok(BnanPipeline {
+            device,
+            shader_modules: vec![vertex_shader_module, fragment_shader_module],
+            pipeline_layout: pipeline_config_info.pipeline_layout,
+            pipeline
+        })
+    }
     
     fn load_shader_module(device: ArcMut<BnanDevice>, filepath: String) -> Result<vk::ShaderModule> {
 
@@ -202,6 +215,46 @@ impl BnanPipeline {
             .module(fragment_shader_module);
 
         let stages = [mesh_shader_stage, fragment_shader_stage];
+
+        let vertex_info = vk::PipelineVertexInputStateCreateInfo::default()
+            .vertex_attribute_descriptions(&info.attribute_descriptions)
+            .vertex_binding_descriptions(&info.binding_descriptions);
+
+        let pipeline = vk::GraphicsPipelineCreateInfo::default()
+            .stages(&stages)
+            .vertex_input_state(&vertex_info)
+            .viewport_state(&info.viewport_info)
+            .input_assembly_state(&info.input_assembly_info)
+            .rasterization_state(&info.rasterization_info)
+            .multisample_state(&info.multisample_info)
+            .color_blend_state(&info.color_blend_info)
+            .depth_stencil_state(&info.depth_stencil_info)
+            .dynamic_state(&info.dynamic_state_info)
+            .layout(info.pipeline_layout)
+            .render_pass(info.render_pass)
+            .subpass(info.subpass)
+
+            .base_pipeline_index(-1)
+            .base_pipeline_handle(vk::Pipeline::null())
+            .push_next(&mut info.pipeline_rendering_info);
+
+        unsafe {
+            Ok(device.lock().unwrap().device.create_graphics_pipelines(vk::PipelineCache::null(), &[pipeline], None).unwrap()[0])
+        }
+    }
+
+    fn create_traditional_graphics_pipeline(device: ArcMut<BnanDevice>, vertex_shader_module: vk::ShaderModule, fragment_shader_module: vk::ShaderModule, info: &mut GraphicsPipelineConfigInfo) -> Result<vk::Pipeline> {
+        let vertex_shader_stage = vk::PipelineShaderStageCreateInfo::default()
+            .name(c"main")
+            .stage(vk::ShaderStageFlags::VERTEX)
+            .module(vertex_shader_module);
+
+        let fragment_shader_stage = vk::PipelineShaderStageCreateInfo::default()
+            .name(c"main")
+            .stage(vk::ShaderStageFlags::FRAGMENT)
+            .module(fragment_shader_module);
+
+        let stages = [vertex_shader_stage, fragment_shader_stage];
 
         let vertex_info = vk::PipelineVertexInputStateCreateInfo::default()
             .vertex_attribute_descriptions(&info.attribute_descriptions)

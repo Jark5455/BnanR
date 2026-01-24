@@ -1,26 +1,104 @@
 use cgmath::*;
-
+use cgmath::num_traits::FloatConst;
+use sdl3_sys::everything::{SDL_Scancode, SDL_SCANCODE_A, SDL_SCANCODE_D, SDL_SCANCODE_LCTRL, SDL_SCANCODE_S, SDL_SCANCODE_SPACE, SDL_SCANCODE_W};
+use sdl3_sys::keyboard::SDL_GetKeyboardState;
 use crate::core::bnan_window::{WindowObserver};
+
+pub struct InternalKeyboardState {
+    forward: bool,
+    backward: bool,
+    left: bool,
+    right: bool,
+    up: bool,
+    down: bool,
+}
+
+enum Projection {
+    Orthographic { aspect: f32, top: f32, bottom: f32, near: f32, far: f32 },
+    Perspective { fovy: f32, aspect: f32, near: f32, far: f32 },
+}
+
+impl Default for Projection {
+    fn default() -> Self {
+        Projection::Orthographic {
+            aspect: 1.0,
+            top: -1.0,
+            bottom: 0.0,
+            near: -1.0,
+            far: 1.0,
+        }
+    }
+}
 
 pub struct BnanCamera {
     pub position: Vector3<f32>,
     pub rotation: Vector3<f32>,
 
+    pub projection: Projection,
     pub projection_matrix: Matrix4<f32>,
     pub inverse_projection_matrix: Matrix4<f32>,
     pub view_matrix: Matrix4<f32>,
     pub inverse_view_matrix: Matrix4<f32>,
 
+    pub keyboard_state: InternalKeyboardState,
     pub move_sense: f32,
     pub look_sense: f32,
+}
+
+impl WindowObserver<(i32, i32)> for BnanCamera {
+    fn update(&mut self, data: (i32, i32)) {
+
+        let (width, height) = data;
+        let aspect = width as f32 / height as f32;
+
+        match self.projection {
+            Projection::Orthographic { top, bottom, near, far, .. } => {
+                self.set_orthographic_projection(aspect, top, bottom, near, far);
+            },
+
+            Projection::Perspective { fovy, near, far, .. } => {
+                self.set_perspective_projection(fovy, aspect, near, far);
+            },
+        }
+    }
 }
 
 impl WindowObserver<(f32, f32)> for BnanCamera {
     fn update(&mut self, data: (f32, f32)) {
         let (x, y) = data;
-        let vec = self.look_sense * Vector3::new(x, y, 0.0);
+        let vec = self.look_sense * Vector3::new(-y, x, 0.0);
 
-        self.set_view(self.position, self.rotation + vec);
+        let mut rot = self.rotation + vec;
+        rot.x = rot.x.clamp(-1.5, 1.5);
+        rot.y = rot.y % (f32::PI() * 2.0);
+
+        self.set_view(self.position, rot);
+    }
+}
+
+impl WindowObserver<()> for BnanCamera {
+
+    fn update(&mut self, _data: ()) {
+
+        const MOVE_FORWARD: SDL_Scancode = SDL_SCANCODE_W;
+        const MOVE_BACK: SDL_Scancode = SDL_SCANCODE_S;
+
+        const MOVE_LEFT: SDL_Scancode = SDL_SCANCODE_A;
+        const MOVE_RIGHT: SDL_Scancode = SDL_SCANCODE_D;
+
+        const MOVE_UP: SDL_Scancode = SDL_SCANCODE_SPACE;
+        const MOVE_DOWN: SDL_Scancode = SDL_SCANCODE_LCTRL;
+
+        unsafe {
+            let state = SDL_GetKeyboardState(std::ptr::null_mut());
+
+            self.keyboard_state.forward = *state.add(MOVE_FORWARD.0 as usize);
+            self.keyboard_state.backward = *state.add(MOVE_BACK.0 as usize);
+            self.keyboard_state.left = *state.add(MOVE_LEFT.0 as usize);
+            self.keyboard_state.right = *state.add(MOVE_RIGHT.0 as usize);
+            self.keyboard_state.up = *state.add(MOVE_UP.0 as usize);
+            self.keyboard_state.down = *state.add(MOVE_DOWN.0 as usize);
+        }
     }
 }
 
@@ -31,17 +109,62 @@ impl BnanCamera {
             position: Vector3::zero(),
             rotation: Vector3::zero(),
 
+            projection: Projection::default(),
             projection_matrix: Matrix4::identity(),
             inverse_projection_matrix: Matrix4::identity(),
             view_matrix: Matrix4::identity(),
             inverse_view_matrix: Matrix4::identity(),
 
-            move_sense: 10.0,
-            look_sense: 0.0025,
+            keyboard_state: InternalKeyboardState { up: false, down: false, forward: false, backward: false, left: false, right: false, },
+            move_sense: 0.005,
+            look_sense: 0.005,
         }
     }
 
-    pub fn set_orthographic_projection(&mut self, left: f32, right: f32, top: f32, bottom: f32, near: f32, far: f32) {
+    pub fn move_in_xz(&mut self, dt: f32) {
+        let yaw = self.rotation.y;
+
+        let forward = Vector3::new(yaw.sin(), 0.0, yaw.cos());
+        let right = Vector3::new(forward.z, 0.0, -forward.x);
+        let up = Vector3::new(0.0, -1.0, 0.0);
+
+        let mut vec = Vector3::new(0.0, 0.0, 0.0);
+
+        if self.keyboard_state.forward {
+            vec += forward;
+        }
+
+        if self.keyboard_state.backward {
+            vec -= forward;
+        }
+
+        if self.keyboard_state.left {
+            vec -= right;
+        }
+
+        if self.keyboard_state.right {
+            vec += right;
+        }
+
+        if self.keyboard_state.up {
+            vec += up;
+        }
+
+        if self.keyboard_state.down {
+            vec -= up;
+        }
+
+        if vec.magnitude() > f32::EPSILON {
+            self.position += vec.normalize() * dt * self.move_sense;
+            self.set_view(self.position, self.rotation);
+        }
+    }
+
+    pub fn set_orthographic_projection(&mut self, aspect: f32, top: f32, bottom: f32, near: f32, far: f32) {
+
+        let left = -aspect;
+        let right = aspect;
+
         self.projection_matrix = Matrix4::identity();
         self.projection_matrix[0][0] = 2.0 / (right - left);
         self.projection_matrix[1][1] = 2.0 / (bottom - top);
@@ -57,6 +180,14 @@ impl BnanCamera {
         self.inverse_projection_matrix[3][0] = (left + right) / 2.0;
         self.inverse_projection_matrix[3][1] = (bottom + top) / 2.0;
         self.inverse_projection_matrix[3][2] = near;
+
+        self.projection = Projection::Orthographic {
+            aspect,
+            top,
+            bottom,
+            near,
+            far,
+        };
     }
 
     pub fn set_perspective_projection(&mut self, fovy: f32, aspect: f32, near: f32, far: f32) {
@@ -77,6 +208,13 @@ impl BnanCamera {
         self.inverse_projection_matrix[3][2] = 1.0;
         self.inverse_projection_matrix[2][3] = (near - far) / (near * far);
         self.inverse_projection_matrix[3][3] = 1.0 / near;
+
+        self.projection = Projection::Perspective {
+            fovy,
+            aspect,
+            near,
+            far,
+        };
     }
 
     pub fn set_view(&mut self, position: Vector3<f32>, rotation: Vector3<f32>) {
