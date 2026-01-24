@@ -22,9 +22,15 @@ exr = { git = "https://github.com/virtualritz/exrs", branch = "dwa-restore" }
 image = "0.25.9"
 meshopt = "0.6.2"
 
+[package.metadata.vcpkg]
+git = "https://github.com/microsoft/vcpkg"
+branch = "master"
+dependencies = ["sdl3", "vulkan", "vulkan-memory-allocator", "shaderc", "assimp", "meshoptimizer"]
+
 [build-dependencies]
 glob = "0.3.3"
 shaderc = "0.10.1"
+vcpkg = "0.2.15"
 
 [lib]
 name = "BnanR"

@@ -23,6 +23,7 @@ dependencies = [
  "sdl3-sys",
  "serde",
  "shaderc",
+ "vcpkg",
  "vk-mem",
 ]
 
