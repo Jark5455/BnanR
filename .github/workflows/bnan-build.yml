@@ -39,7 +39,7 @@ jobs:
 
       - name: Print vcpkg failure logs
         if: failure()
-        run: find target/vcpkg/buildtrees -name "*-err.log" -print0 | xargs -0 cat
+        run: find target/vcpkg/buildtrees -name "*.log" -print0 | xargs -0 cat
 
       - name: Build
         run: cargo build --verbose
