@@ -1,4 +1,4 @@
-mod simple_system;
+mod meshlet_system;
 
 use ash::*;
 use cgmath::num_traits::FloatConst;
@@ -11,7 +11,8 @@ use BnanR::core::bnan_window::{BnanWindow, WindowObserver};
 use BnanR::core::bnan_render_graph::graph::BnanRenderGraph;
 use BnanR::core::bnan_render_graph::pass::RenderPass;
 use BnanR::core::bnan_render_graph::pass::RenderPassResource;
-use crate::simple_system::SimpleSystem;
+
+use crate::meshlet_system::MeshletSystem;
 
 struct Quit {
     pub quit: bool,
@@ -41,7 +42,9 @@ fn main() {
     camera.borrow_mut().set_perspective_projection(f32::PI() / 2.0, aspect, 0.1, 10.0);
     camera.borrow_mut().set_view(Vector3 {x: 0.0, y: 0.0, z: -2.0}, Vector3 {x: 0.0, y: 0.0, z: 0.0});
 
-    let system = make_rcmut(SimpleSystem::new(device.clone(), render_graph.clone()).unwrap());
+    let system = make_rcmut(MeshletSystem::new(device.clone(), render_graph.clone()).unwrap());
+    system.borrow_mut().load_meshlet_mesh("./build/assets2.bpk", "assets/ceramic_vase_01_4k.blend").unwrap();
+    system.borrow_mut().update_meshlet_data().unwrap();
 
     {
         let mut window_guard = window.lock().unwrap();

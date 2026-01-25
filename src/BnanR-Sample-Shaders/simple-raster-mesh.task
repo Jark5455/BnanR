@@ -1,0 +1,73 @@
+#version 460
+#extension GL_EXT_mesh_shader : require
+#extension GL_EXT_shader_8bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_KHR_shader_subgroup_ballot : require
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+struct MeshletData {
+    uint position_offset;
+    uint vertex_offset;
+    uint vertex_count;
+    uint triangle_offset;
+    uint triangle_count;
+    vec3 bound_center;
+    float bound_radius;
+};
+
+struct TaskPayload {
+    uint meshletIndices[32];
+};
+
+taskPayloadSharedEXT TaskPayload payload;
+
+layout(set = 0, binding = 0) uniform UBO {
+    mat4 projection;
+    mat4 view;
+    mat4 invView;
+    vec4 frustumPlanes[6];
+} ubo;
+
+layout(scalar, set = 0, binding = 4) readonly buffer GlobalMeshletData {
+    MeshletData data[];
+} global_meshlet_data;
+
+layout(push_constant) uniform Push {
+    uint meshlet_count;
+} push;
+
+bool IsVisible(vec3 center, float radius) {
+    for (int i = 0; i < 6; i++) {
+        float dist = dot(ubo.frustumPlanes[i].xyz, center) + ubo.frustumPlanes[i].w;
+
+        if (dist < -radius) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void main() {
+    uint gID = gl_GlobalInvocationID.x;
+
+    bool visible = false;
+
+    if (gID < push.meshlet_count) {
+        MeshletData meshlet = global_meshlet_data.data[gID];
+        visible = IsVisible(meshlet.bound_center, meshlet.bound_radius);
+    }
+
+    uvec4 vote = subgroupBallot(visible);
+    uint tasksCount = subgroupBallotBitCount(vote);
+
+    if (visible) {
+        uint indexOffset = subgroupBallotExclusiveBitCount(vote);
+        payload.meshletIndices[indexOffset] = gID;
+    }
+
+    if (gl_LocalInvocationID.x == 0) {
+        EmitMeshTasksEXT(tasksCount, 1, 1);
+    }
+}

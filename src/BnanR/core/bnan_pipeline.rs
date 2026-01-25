@@ -79,7 +79,7 @@ impl<'a> Default for GraphicsPipelineConfigInfo<'a> {
             .rasterizer_discard_enable(false)
             .polygon_mode(vk::PolygonMode::FILL)
             .line_width(1.0)
-            .cull_mode(vk::CullModeFlags::NONE)
+            .cull_mode(vk::CullModeFlags::BACK)
             .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
             .depth_bias_enable(false)
             .depth_bias_constant_factor(0.0)
@@ -145,10 +145,18 @@ impl BnanPipeline {
         })
     }
 
-    pub fn new_graphics_pipeline(device: ArcMut<BnanDevice>, mesh_shader: String, fragment_shader: String, pipeline_config_info: &mut GraphicsPipelineConfigInfo) -> Result<BnanPipeline> {
+    pub fn new_graphics_pipeline(device: ArcMut<BnanDevice>, mesh_shader: String, fragment_shader: String, task_shader: Option<String>, pipeline_config_info: &mut GraphicsPipelineConfigInfo) -> Result<BnanPipeline> {
         let mesh_shader_module = Self::load_shader_module(device.clone(), mesh_shader)?;
         let fragment_shader_module = Self::load_shader_module(device.clone(), fragment_shader)?;
-        let pipeline = Self::create_graphics_pipeline(device.clone(), mesh_shader_module, fragment_shader_module, pipeline_config_info)?;
+
+        let pipeline: vk::Pipeline;
+
+        if let Some(task_shader) = task_shader {
+            let task_shader_module = Self::load_shader_module(device.clone(), task_shader)?;
+            pipeline = Self::create_graphics_pipeline(device.clone(), mesh_shader_module, fragment_shader_module, Some(task_shader_module), pipeline_config_info)?;
+        } else {
+            pipeline = Self::create_graphics_pipeline(device.clone(), mesh_shader_module, fragment_shader_module, None, pipeline_config_info)?;
+        }
 
         Ok(BnanPipeline {
             device,
@@ -203,7 +211,7 @@ impl BnanPipeline {
         unsafe { Ok(device.lock().unwrap().device.create_compute_pipelines(vk::PipelineCache::null(), &[pipeline], None).unwrap()[0]) }
     }
 
-    fn create_graphics_pipeline(device: ArcMut<BnanDevice>, mesh_shader_module: vk::ShaderModule, fragment_shader_module: vk::ShaderModule, info: &mut GraphicsPipelineConfigInfo) -> Result<vk::Pipeline> {
+    fn create_graphics_pipeline(device: ArcMut<BnanDevice>, mesh_shader_module: vk::ShaderModule, fragment_shader_module: vk::ShaderModule, task_shader: Option<vk::ShaderModule>, info: &mut GraphicsPipelineConfigInfo) -> Result<vk::Pipeline> {
         let mesh_shader_stage = vk::PipelineShaderStageCreateInfo::default()
             .name(c"main")
             .stage(vk::ShaderStageFlags::MESH_EXT)
@@ -214,7 +222,16 @@ impl BnanPipeline {
             .stage(vk::ShaderStageFlags::FRAGMENT)
             .module(fragment_shader_module);
 
-        let stages = [mesh_shader_stage, fragment_shader_stage];
+        let mut stages = vec![mesh_shader_stage, fragment_shader_stage];
+
+        if let Some(task_shader) = task_shader {
+            let task_shader_stage = vk::PipelineShaderStageCreateInfo::default()
+                .name(c"main")
+                .stage(vk::ShaderStageFlags::TASK_EXT)
+                .module(task_shader);
+
+            stages.push(task_shader_stage);
+        }
 
         let vertex_info = vk::PipelineVertexInputStateCreateInfo::default()
             .vertex_attribute_descriptions(&info.attribute_descriptions)

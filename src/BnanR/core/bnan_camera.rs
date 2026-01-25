@@ -1,7 +1,8 @@
+use anyhow::*;
 use cgmath::*;
 use cgmath::num_traits::FloatConst;
-use sdl3_sys::everything::{SDL_Scancode, SDL_SCANCODE_A, SDL_SCANCODE_D, SDL_SCANCODE_LCTRL, SDL_SCANCODE_S, SDL_SCANCODE_SPACE, SDL_SCANCODE_W};
-use sdl3_sys::keyboard::SDL_GetKeyboardState;
+use sdl3_sys::everything::*;
+
 use crate::core::bnan_window::{WindowObserver};
 
 pub struct InternalKeyboardState {
@@ -261,5 +262,28 @@ impl BnanCamera {
         self.inverse_view_matrix[3][0] = position.x;
         self.inverse_view_matrix[3][1] = position.y;
         self.inverse_view_matrix[3][2] = position.z;
+    }
+
+    pub fn get_frustum_planes(&self) -> Result<[Vector4<f32>; 6]> {
+        if let Projection::Perspective { fovy, aspect, near, far } = &self.projection {
+            fn normalize_plane(plane: Vector4<f32>) -> Vector4<f32> {
+                let normal_xyz = plane.truncate();
+                let length = normal_xyz.magnitude();
+                plane / length
+            }
+
+            let m = self.projection_matrix * self.view_matrix;
+
+            return Ok([
+                normalize_plane(m.row(3) + m.row(0)),
+                normalize_plane(m.row(3) - m.row(0)),
+                normalize_plane(m.row(3) + m.row(1)),
+                normalize_plane(m.row(3) - m.row(1)),
+                normalize_plane(m.row(2)),
+                normalize_plane(m.row(3) - m.row(2)),
+            ]);
+        }
+
+        bail!("can only calculate frustum planes of perspective projection");
     }
 }

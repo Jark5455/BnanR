@@ -31,6 +31,7 @@ pub fn compile_shaders() {
             "frag" => shaderc::ShaderKind::Fragment,
             "comp" => shaderc::ShaderKind::Compute,
             "mesh" => shaderc::ShaderKind::Mesh,
+            "task" => shaderc::ShaderKind::Task,
             _ => { panic!("unknown shader type: {}", ext); }
         };
 

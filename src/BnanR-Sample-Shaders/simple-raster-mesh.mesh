@@ -21,11 +21,15 @@ struct MeshletData {
     uint vertex_count;
     uint triangle_offset;
     uint triangle_count;
+    vec3 bound_center;
+    float bound_radius;
 };
 
 layout(set = 0, binding = 0) uniform UBO {
     mat4 projection;
     mat4 view;
+    mat4 invView;
+    vec4 frustumPlanes[6];
 } ubo;
 
 layout(scalar, set = 0, binding = 1) readonly buffer GlobalPosition {
@@ -52,30 +56,20 @@ void main() {
     uint lane_id = gl_LocalInvocationID.x;
 
     if (lane_id < m.vertex_count) {
-        // Calculate the global index for this specific vertex
-        // Note: Meshlets usually reference a global vertex buffer directly
         uint global_vertex_id = (m.position_offset / 12) + lane_id;
         vec3 pos = global_position.positions[global_vertex_id];
 
-        // Transform
         gl_MeshVerticesEXT[lane_id].gl_Position = ubo.projection * ubo.view * vec4(pos, 1.0);
-
         v_color[lane_id] = vec4(1.0, 1.0, 1.0, 1.0);
     }
 
-    // 5. Parallel Triangle Processing
-    // The same threads loop again to process triangles
-    // (Meshlets have separate Vertex and Primitive counts)
     if (lane_id < m.triangle_count) {
-        // Calculate where the 3 indices for this triangle start
         uint global_index_offset = m.triangle_offset + (lane_id * 3);
 
-        // Load 3 consecutive bytes (u8)
         uint i0 = uint(global_index.indices[global_index_offset + 0]);
         uint i1 = uint(global_index.indices[global_index_offset + 1]);
         uint i2 = uint(global_index.indices[global_index_offset + 2]);
 
-        // Output the triangle
         gl_PrimitiveTriangleIndicesEXT[lane_id] = uvec3(i0, i1, i2);
     }
 }
