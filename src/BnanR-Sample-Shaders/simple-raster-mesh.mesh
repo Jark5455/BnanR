@@ -25,6 +25,11 @@ struct MeshletData {
     float bound_radius;
 };
 
+struct TaskPayload {
+    uint meshletIndices[32];
+};
+taskPayloadSharedEXT TaskPayload payload;
+
 layout(set = 0, binding = 0) uniform UBO {
     mat4 projection;
     mat4 view;
@@ -49,7 +54,7 @@ layout(scalar, set = 0, binding = 4) readonly buffer GlobalMeshletData {
 } global_meshlet_data;
 
 void main() {
-    uint meshlet_id = gl_WorkGroupID.x;
+    uint meshlet_id = payload.meshletIndices[gl_WorkGroupID.x];
     MeshletData m = global_meshlet_data.data[meshlet_id];
     SetMeshOutputsEXT(m.vertex_count, m.triangle_count);
 

@@ -176,7 +176,6 @@ impl MeshletSystem {
         let mut archive = BpkArchive::open(archive_path)?;
         
         let dag = archive.load_meshlet_dag(mesh_name)?;
-        let root_count = dag.root_indices.len();
 
         struct CopyOp {
             src_offset: u64,
@@ -192,7 +191,7 @@ impl MeshletSystem {
         const VERTEX_SIZE: u64 = size_of::<Vertex>() as u64;   // Vertex struct = normal(12) + tangent(12) + uv(8)
         const TRIANGLE_SIZE: u64 = 3;  // 3 x u8 indices per triangle
         
-        for (i, &node_idx) in dag.root_indices.iter().enumerate() {
+        for (i, &node_idx) in dag.leaf_indices.iter().enumerate() {
             let node = &dag.nodes[node_idx as usize];
             let meshlet_path = format!("{}/meshlet_{}", mesh_name, node_idx);
             
