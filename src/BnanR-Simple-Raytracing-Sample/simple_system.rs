@@ -125,7 +125,7 @@ impl WindowObserver<(i32, i32)> for SimpleSystem {
             .height(data.1 as u32)
             .depth(1);
 
-        let vec: Result<Vec<_>> = (0..FRAMES_IN_FLIGHT).map(|_| BnanImage::new(self.device.clone(), vk::Format::R16G16B16A16_SFLOAT, vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC, vk::MemoryPropertyFlags::DEVICE_LOCAL, extent, vk::SampleCountFlags::TYPE_1)).collect();
+        let vec: Result<Vec<_>> = (0..FRAMES_IN_FLIGHT).map(|_| BnanImage::new(self.device.clone(), vk::Format::R16G16B16A16_SFLOAT, vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC, vk::MemoryPropertyFlags::DEVICE_LOCAL, extent, vk::SampleCountFlags::TYPE_1, None)).collect();
 
         let images: [BnanImage; FRAMES_IN_FLIGHT] = match vec.unwrap().try_into() {
             Result::Ok(fences) => fences,
@@ -307,7 +307,7 @@ impl SimpleSystem {
             device_guard.device.cmd_dispatch(frame_info.main_command_buffer, x, y, 1);
 
             BnanBarrierBuilder::new()
-                .flush_writes(self.draw_images[frame_info.frame_index].image, vk::ImageLayout::GENERAL, vk::PipelineStageFlags2::ALL_COMMANDS, vk::AccessFlags2::MEMORY_WRITE, vk::PipelineStageFlags2::TRANSFER, vk::AccessFlags2::TRANSFER_READ, None, None)
+                .flush_writes(self.draw_images[frame_info.frame_index].image, vk::ImageLayout::GENERAL, vk::PipelineStageFlags2::ALL_COMMANDS, vk::AccessFlags2::SHADER_STORAGE_WRITE, vk::PipelineStageFlags2::TRANSFER, vk::AccessFlags2::TRANSFER_READ, None, None)
                 .record(&*device_guard, frame_info.main_command_buffer);
 
             device_guard.device.cmd_blit_image2(frame_info.main_command_buffer, &blit_info);
@@ -359,7 +359,7 @@ impl SimpleSystem {
     }
 
     fn create_draw_images(device: ArcMut<BnanDevice>, extent: vk::Extent3D) -> Result<[BnanImage; FRAMES_IN_FLIGHT]> {
-        let vec: Result<Vec<_>> = (0..FRAMES_IN_FLIGHT).map(|_| BnanImage::new(device.clone(), vk::Format::R16G16B16A16_SFLOAT, vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC, vk::MemoryPropertyFlags::DEVICE_LOCAL, extent, vk::SampleCountFlags::TYPE_1) ).collect();
+        let vec: Result<Vec<_>> = (0..FRAMES_IN_FLIGHT).map(|_| BnanImage::new(device.clone(), vk::Format::R16G16B16A16_SFLOAT, vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC, vk::MemoryPropertyFlags::DEVICE_LOCAL, extent, vk::SampleCountFlags::TYPE_1, None) ).collect();
 
         let images: [BnanImage; FRAMES_IN_FLIGHT] = match vec?.try_into() {
             Result::Ok(images) => images,
@@ -454,6 +454,6 @@ impl SimpleSystem {
 
     fn create_pipeline(device: ArcMut<BnanDevice>, descriptor_set_layout: &BnanDescriptorSetLayout) -> Result<BnanPipeline> {
         let layouts = vec![descriptor_set_layout.layout];
-        Ok(BnanPipeline::new_compute_pipeline(device, SIMPLE_COMP_FILEPATH.to_owned(), layouts)?)
+        Ok(BnanPipeline::new_compute_pipeline(device, SIMPLE_COMP_FILEPATH.to_owned(), layouts, None)?)
     }
 }

@@ -193,13 +193,13 @@ impl SimpleSystem {
             .depth(1);
 
         let depth_vec: Result<Vec<_>> = (0..FRAMES_IN_FLIGHT).map(|_|
-            Ok(make_arcmut(BnanImage::new(device.clone(), depth_format, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT, vk::MemoryPropertyFlags::DEVICE_LOCAL, extent, sample_count)?))
+            Ok(make_arcmut(BnanImage::new(device.clone(), depth_format, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT, vk::MemoryPropertyFlags::DEVICE_LOCAL, extent, sample_count, None)?))
         ).collect();
 
         let depth_images: [ArcMut<BnanImage>; FRAMES_IN_FLIGHT] = depth_vec?.try_into().map_err(|_| anyhow!("something went wrong while creating depth images"))?;
 
         let color_vec: Result<Vec<_>> = (0..FRAMES_IN_FLIGHT).map(|_|
-            Ok(make_arcmut(BnanImage::new(device.clone(), color_format, vk::ImageUsageFlags::COLOR_ATTACHMENT, vk::MemoryPropertyFlags::DEVICE_LOCAL, extent, sample_count)?))
+            Ok(make_arcmut(BnanImage::new(device.clone(), color_format, vk::ImageUsageFlags::COLOR_ATTACHMENT, vk::MemoryPropertyFlags::DEVICE_LOCAL, extent, sample_count, None)?))
         ).collect();
 
         let color_images: [ArcMut<BnanImage>; FRAMES_IN_FLIGHT] = color_vec?.try_into().map_err(|_| anyhow!("something went wrong while creating depth images"))?;

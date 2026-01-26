@@ -68,16 +68,18 @@ fn main() {
                 stage: vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS,
                 layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
                 resolve_target: None,
+                use_previous_frame: false,
             },
             RenderPassResource {
                 handle: color_handle,
                 stage: vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
                 layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
                 resolve_target: Some(backbuffer),
+                use_previous_frame: false,
             },
         ],
 
-        Box::new(move |_cmd, frame_info| {
+        Box::new(move |_graph, frame_info| {
             camera.borrow_mut().move_in_xz(frame_info.frame_time / 1000.0);
             system.borrow_mut().update_uniform_buffers(frame_info, camera.clone()).unwrap();
             system.borrow().draw(frame_info);

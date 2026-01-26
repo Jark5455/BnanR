@@ -161,6 +161,37 @@ impl BnanRenderGraph {
         self.swapchain_resource_handle.clone().unwrap()
     }
 
+    /// Retrieves the underlying image for a given resource handle and frame index.
+    /// Returns None if the handle doesn't exist or isn't an image resource.
+    pub fn get_image(&self, handle: &ResourceHandle, frame: usize) -> Option<ArcMut<BnanImage>> {
+        self.resources.get(&handle.0).and_then(|physical| {
+            match &physical.resource {
+                ResourceType::Image(images) => Some(images[frame].clone()),
+                ResourceType::SwapchainImage(image) => Some(image.clone()),
+                _ => None,
+            }
+        })
+    }
+
+    /// Retrieves all per-frame images for a given resource handle.
+    /// Useful for setting up descriptors for all frames in flight before the render loop.
+    /// Returns None if the handle doesn't exist or isn't a per-frame image resource.
+    pub fn get_images(&self, handle: &ResourceHandle) -> Option<[ArcMut<BnanImage>; FRAMES_IN_FLIGHT]> {
+        self.resources.get(&handle.0).and_then(|physical| {
+            match &physical.resource {
+                ResourceType::Image(images) => Some(images.clone()),
+                _ => None,
+            }
+        })
+    }
+
+    /// Retrieves the previous frame's image for a given resource handle.
+    /// Useful for temporal effects like occlusion culling with Hi-Z from frame N-1.
+    pub fn get_previous_frame_image(&self, handle: &ResourceHandle, current_frame: usize) -> Option<ArcMut<BnanImage>> {
+        let prev_frame = (current_frame + FRAMES_IN_FLIGHT - 1) % FRAMES_IN_FLIGHT;
+        self.get_image(handle, prev_frame)
+    }
+
     pub fn import_render_image(&mut self, name: &str, images: [ArcMut<BnanImage>; FRAMES_IN_FLIGHT]) -> ResourceHandle {
         self.resource_counter += 1;
         if self.resource_counter <= 1 { self.resource_counter = 1; }
@@ -286,7 +317,7 @@ impl BnanRenderGraph {
              let device = self.device.lock().unwrap();
              let mut barrier_builder = BnanBarrierBuilder::new();
              
-             let mut process_resource = |handle: &ResourceHandle, required_stage, required_layout, builder: &mut BnanBarrierBuilder| {
+             let mut process_resource = |handle: &ResourceHandle, required_stage, required_layout, use_frame: usize, builder: &mut BnanBarrierBuilder| {
                  if let Some(physical) = self.resources.get_mut(&handle.0) {
                      let mut needs_barrier = false;
                      
@@ -295,7 +326,7 @@ impl BnanRenderGraph {
                          needs_barrier = true;
                      }
                      
-                     if physical.current_stage != vk::PipelineStageFlags2::NONE {
+                     if physical.current_stage != required_stage {
                          needs_barrier = true;
                      }
                      
@@ -307,8 +338,8 @@ impl BnanRenderGraph {
                              },
                              
                              ResourceType::Image(images) => {
-                                 let image = images[frame_info.frame_index].lock().unwrap();
-                                 builder.transition_image_layout(image.image, physical.current_layout, required_layout, None, None, None).unwrap();
+                                 let image = images[use_frame].lock().unwrap();
+                                 builder.transition_image_layout(image.image, physical.current_layout, required_layout, None, Some(image.mip_levels), None).unwrap();
                              },
                              
                              ResourceType::Buffer(_) => {
@@ -323,22 +354,44 @@ impl BnanRenderGraph {
              };
 
              for input in &pass.inputs {
-                 process_resource(&input.handle, input.stage, input.layout, &mut barrier_builder);
+                 let use_frame = if input.use_previous_frame {
+                     (frame_info.frame_index + (FRAMES_IN_FLIGHT - 1)) % FRAMES_IN_FLIGHT
+                 } else {
+                     frame_info.frame_index
+                 };
+                 
+                 process_resource(&input.handle, input.stage, input.layout, use_frame, &mut barrier_builder);
              }
              
              for output in &pass.outputs {
-                 process_resource(&output.handle, output.stage, output.layout, &mut barrier_builder);
+                 process_resource(&output.handle, output.stage, output.layout, frame_info.frame_index, &mut barrier_builder);
                  
                  if let Some(resolve_handle) = &output.resolve_target {
-                     process_resource(
-                         resolve_handle,
-                         vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
-                         vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                         &mut barrier_builder
-                     );
+
+                     match output.layout {
+                         vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL => {
+                             process_resource(
+                                 resolve_handle,
+                                 vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS,
+                                 vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                                 frame_info.frame_index,
+                                 &mut barrier_builder,
+                             );
+                         }
+
+                         _ => {
+                             process_resource(
+                                 resolve_handle,
+                                 vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+                                 vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                                 frame_info.frame_index,
+                                 &mut barrier_builder
+                             );
+                         }
+                     };
                  }
              }
-             
+
              barrier_builder.record(&device, command_buffer);
              
              drop(device); // Drop lock before execute
@@ -348,7 +401,6 @@ impl BnanRenderGraph {
              let mut depth_attachment: Option<vk::RenderingAttachmentInfo> = None;
              let mut render_extent: Option<vk::Extent2D> = None;
              
-             // Infer attachments from outputs
              for output in &pass.outputs {
                  if output.layout == vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL {
                      if let Some(physical) = self.resources.get(&output.handle.0) {
@@ -409,12 +461,31 @@ impl BnanRenderGraph {
                              let mut clear_value = vk::ClearValue::default();
                              clear_value.depth_stencil = CLEAR_DEPTH_STENCIL;
 
-                             depth_attachment = Some(vk::RenderingAttachmentInfo::default()
+                             let mut depth_att = vk::RenderingAttachmentInfo::default()
                                  .image_view(image.image_view)
                                  .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
                                  .load_op(vk::AttachmentLoadOp::CLEAR)
                                  .store_op(vk::AttachmentStoreOp::STORE)
-                                 .clear_value(clear_value));
+                                 .clear_value(clear_value);
+                             
+                             // Handle depth resolve target with RESOLVE_MODE_MAX
+                             if let Some(resolve_handle) = &output.resolve_target {
+                                 if let Some(resolve_physical) = self.resources.get(&resolve_handle.0) {
+                                     let resolve_image_guard = match &resolve_physical.resource {
+                                         ResourceType::SwapchainImage(image_arc) => Some(image_arc.lock().unwrap()),
+                                         ResourceType::Image(images) => Some(images[frame_info.frame_index].lock().unwrap()),
+                                         ResourceType::Buffer(_) => None,
+                                     };
+                                     if let Some(resolve_image) = resolve_image_guard {
+                                         depth_att = depth_att
+                                             .resolve_image_view(resolve_image.image_view)
+                                             .resolve_image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                                             .resolve_mode(vk::ResolveModeFlags::MAX);
+                                     }
+                                 }
+                             }
+                             
+                             depth_attachment = Some(depth_att);
                              
                              is_dynamic_rendering = true;
                              
@@ -447,7 +518,7 @@ impl BnanRenderGraph {
              }
 
              match &pass.execute {
-                f => f(&command_buffer, &frame_info),
+                f => f(&self, &frame_info),
              }
              
              if is_dynamic_rendering {
@@ -462,7 +533,7 @@ impl BnanRenderGraph {
             let swapchain_handle = self.swapchain_resource_handle.clone().unwrap();
             let physical = self.resources.get(&swapchain_handle.0).unwrap();
 
-            let mut builder = BnanBarrierBuilder::new()
+            let builder = BnanBarrierBuilder::new()
                 .transition_image_layout(swapchain_image, physical.current_layout, vk::ImageLayout::PRESENT_SRC_KHR, None, None, None)?
                 .record(&*device, command_buffer);
 

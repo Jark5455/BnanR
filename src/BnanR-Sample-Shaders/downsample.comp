@@ -1,0 +1,47 @@
+#version 460
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// Bindings
+// Input: The previous mip level (Read-Only)
+layout(set = 0, binding = 0) uniform sampler2D inputDepth;
+
+// Output: The current mip level we are writing to (Write-Only)
+// r32f allows us to write floating point depth directly
+layout(set = 0, binding = 1, r32f) uniform image2D outputDepth;
+
+// If input size is odd, we need to handle boundary checks
+layout(push_constant) uniform PushConstants {
+    vec2 invOutputSize; // 1.0 / output_resolution
+} push;
+
+void main() {
+    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 outSize = imageSize(outputDepth);
+
+    // Bounds check
+    if (pos.x >= outSize.x || pos.y >= outSize.y) return;
+
+    // 1. Calculate the coordinates of the source pixels
+    // We are generating pixel (x, y) in the lower res image.
+    // This corresponds to (2x, 2y) in the higher res image.
+    ivec2 sourceBase = pos * 2;
+
+    // 2. Fetch the 4 texels from the previous level
+    // We use texelFetch for exact pixel access (no filtering)
+    // "0" is the mip level of the sampler (we bind specific views per pass)
+    float d1 = texelFetch(inputDepth, sourceBase + ivec2(0, 0), 0).r;
+    float d2 = texelFetch(inputDepth, sourceBase + ivec2(1, 0), 0).r;
+    float d3 = texelFetch(inputDepth, sourceBase + ivec2(0, 1), 0).r;
+    float d4 = texelFetch(inputDepth, sourceBase + ivec2(1, 1), 0).r;
+
+    // 3. Reduction (Conservative Downsampling)
+    // FOR STANDARD Z (0=Near, 1=Far): Use max()
+    float result = max(max(d1, d2), max(d3, d4));
+
+    // FOR REVERSE Z (1=Near, 0=Far): Use min()
+    // float result = min(min(d1, d2), min(d3, d4));
+
+    // 4. Write to output
+    imageStore(outputDepth, pos, vec4(result, 0.0, 0.0, 0.0));
+}

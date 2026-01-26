@@ -18,6 +18,7 @@ use BnanR::core::bnan_render_graph::graph::BnanRenderGraph;
 use BnanR::core::bnan_render_graph::resource::ResourceHandle;
 use BnanR::fs::bpk::BpkArchive;
 use BnanR::fs::streaming_buffer::BnanStreamingBuffer;
+use crate::downsample_system::TemporalObserver;
 
 const MESHLET_TASK_FILEPATH: &str = "./build/BnanR-Sample-Shaders/simple-raster-mesh.task.spv";
 const MESHLET_MESH_FILEPATH: &str = "./build/BnanR-Sample-Shaders/simple-raster-mesh.mesh.spv";
@@ -66,12 +67,18 @@ pub struct MeshletSystem {
     
     pub depth_handle: ResourceHandle,
     pub color_handle: ResourceHandle,
+    pub resolved_depth_handle: ResourceHandle,
+
     pub depth_images: [ArcMut<BnanImage>; FRAMES_IN_FLIGHT],
     pub color_images: [ArcMut<BnanImage>; FRAMES_IN_FLIGHT],
+    pub resolved_depth_images: [ArcMut<BnanImage>; FRAMES_IN_FLIGHT],
 
     pub descriptor_pool: BnanDescriptorPool,
     pub descriptor_set_layout: BnanDescriptorSetLayout,
     pub descriptor_sets: [vk::DescriptorSet; FRAMES_IN_FLIGHT],
+    pub temporal_descriptor_set_layout: BnanDescriptorSetLayout,
+    pub temporal_descriptor_sets: [vk::DescriptorSet; FRAMES_IN_FLIGHT],
+    pub temporal_sampler: vk::Sampler,
     pub ubo_buffers: [BnanBuffer; FRAMES_IN_FLIGHT],
     
     pub pipeline: BnanPipeline,
@@ -90,10 +97,46 @@ impl WindowObserver<(i32, i32)> for MeshletSystem {
             .width(width as u32)
             .height(height as u32);
 
-        (self.depth_images, self.color_images) = Self::create_framebuffer_images(self.device.clone(), extent).unwrap();
+        (self.depth_images, self.color_images, self.resolved_depth_images) = Self::create_framebuffer_images(self.device.clone(), extent).unwrap();
 
-        self.render_graph.lock().unwrap().update_render_image(&self.depth_handle, self.depth_images.clone());
-        self.render_graph.lock().unwrap().update_render_image(&self.color_handle, self.color_images.clone());
+        {
+            let mut render_graph_guard = self.render_graph.lock().unwrap();
+            render_graph_guard.update_render_image(&self.depth_handle, self.depth_images.clone());
+            render_graph_guard.update_render_image(&self.color_handle, self.color_images.clone());
+            render_graph_guard.update_render_image(&self.resolved_depth_handle, self.resolved_depth_images.clone());
+        }
+    }
+}
+
+impl TemporalObserver<[ArcMut<BnanImage>; FRAMES_IN_FLIGHT]> for MeshletSystem {
+    fn update(&mut self, data: [ArcMut<BnanImage>; FRAMES_IN_FLIGHT]) {
+
+        let image_info = (0..FRAMES_IN_FLIGHT).map(|frame| {
+            [vk::DescriptorImageInfo::default()
+                .image_view(data[frame].lock().unwrap().image_view)
+                .sampler(self.temporal_sampler)
+                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)]
+        }).collect::<Vec<_>>();
+
+        let writes = (0..FRAMES_IN_FLIGHT).map(|frame| {
+            vk::WriteDescriptorSet::default()
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .dst_binding(0)
+                .image_info(&image_info[frame])
+                .dst_set(self.temporal_descriptor_sets[frame])
+        }).collect::<Vec<_>>();
+
+        unsafe {
+            self.device.lock().unwrap().device.update_descriptor_sets(&writes, &[]);
+        }
+    }
+}
+
+impl Drop for MeshletSystem {
+    fn drop(&mut self) {
+        unsafe {
+            self.device.lock().unwrap().device.destroy_sampler(self.temporal_sampler, None);
+        }
     }
 }
 
@@ -122,10 +165,15 @@ impl MeshletSystem {
         let meshlet_data_buffer = Self::create_meshlet_data_buffer(device.clone())?;
 
         let ubo_buffers = Self::create_uniform_buffers(device.clone())?;
-        let (depth_images, color_images) = Self::create_framebuffer_images(device.clone(), swapchain_extent)?;
+        let (depth_images, color_images, resolved_depth_images) = Self::create_framebuffer_images(device.clone(), swapchain_extent)?;
 
+        /*
         let depth_handle = render_graph.lock().unwrap().import_render_image("MeshletDepthBuffer", depth_images.clone());
         let color_handle = render_graph.lock().unwrap().import_render_image("MeshletColor", color_images.clone());
+        let resolved_depth_handle = render_graph.lock().unwrap().import_render_image("ResolvedDepth", resolved_depth_images.clone());
+         */
+
+        let (depth_handle, color_handle, resolved_depth_handle) = Self::create_framebuffer_image_handles(render_graph.clone(), depth_images.clone(), color_images.clone(), resolved_depth_images.clone());
 
         let descriptor_set_layout = Self::create_descriptor_set_layout(device.clone())?;
         let descriptor_pool = Self::create_descriptor_pool(device.clone())?;
@@ -139,10 +187,15 @@ impl MeshletSystem {
             &global_index_buffer,
             &meshlet_data_buffer,
         )?;
-        
+
+        let temporal_descriptor_set_layout = Self::create_temporal_descriptor_set_layout(device.clone())?;
+        let temporal_descriptor_sets = Self::allocate_temporal_descriptor_sets(device.clone(), &temporal_descriptor_set_layout, &descriptor_pool)?;
+        let temporal_sampler = Self::create_temporal_sampler(device.clone())?;
+
         let pipeline = Self::create_pipeline(
-            device.clone(), 
-            &descriptor_set_layout, 
+            device.clone(),
+            &descriptor_set_layout,
+            &temporal_descriptor_set_layout,
             color_images[0].lock().unwrap().format, 
             depth_images[0].lock().unwrap().format
         )?;
@@ -162,11 +215,16 @@ impl MeshletSystem {
             meshlet_dag: None,
             depth_handle,
             color_handle,
+            resolved_depth_handle,
             depth_images,
             color_images,
+            resolved_depth_images,
             descriptor_pool,
             descriptor_set_layout,
             descriptor_sets,
+            temporal_descriptor_set_layout,
+            temporal_descriptor_sets,
+            temporal_sampler,
             ubo_buffers,
             pipeline,
         })
@@ -398,7 +456,7 @@ impl MeshletSystem {
                 vk::PipelineBindPoint::GRAPHICS, 
                 self.pipeline.pipeline_layout, 
                 0, 
-                &[self.descriptor_sets[frame_info.frame_index]], 
+                &[self.descriptor_sets[frame_info.frame_index], self.temporal_descriptor_sets[frame_info.frame_index]],
                 &[]
             );
 
@@ -465,7 +523,7 @@ impl MeshletSystem {
         Ok(buffer)
     }
 
-    fn create_framebuffer_images(device: ArcMut<BnanDevice>, extent: vk::Extent2D) -> Result<([ArcMut<BnanImage>; FRAMES_IN_FLIGHT], [ArcMut<BnanImage>; FRAMES_IN_FLIGHT])> {
+    fn create_framebuffer_images(device: ArcMut<BnanDevice>, extent: vk::Extent2D) -> Result<([ArcMut<BnanImage>; FRAMES_IN_FLIGHT], [ArcMut<BnanImage>; FRAMES_IN_FLIGHT], [ArcMut<BnanImage>; FRAMES_IN_FLIGHT])> {
         let depth_format = device.lock().unwrap().find_depth_format()?;
         let color_format = vk::Format::B8G8R8A8_SRGB;
 
@@ -476,17 +534,26 @@ impl MeshletSystem {
             .height(extent.height)
             .depth(1);
 
+        // MSAA depth images
         let depth_vec: Result<Vec<_>> = (0..FRAMES_IN_FLIGHT).map(|_|
-            Ok(make_arcmut(BnanImage::new(device.clone(), depth_format, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT, vk::MemoryPropertyFlags::DEVICE_LOCAL, extent, sample_count)?))
+            Ok(make_arcmut(BnanImage::new(device.clone(), depth_format, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT, vk::MemoryPropertyFlags::DEVICE_LOCAL, extent, sample_count, None)?))
         ).collect();
 
         let depth_images: [ArcMut<BnanImage>; FRAMES_IN_FLIGHT] = depth_vec?.try_into().map_err(|_| anyhow!("something went wrong while creating depth images"))?;
 
+        // MSAA color images
         let color_vec: Result<Vec<_>> = (0..FRAMES_IN_FLIGHT).map(|_|
-            Ok(make_arcmut(BnanImage::new(device.clone(), color_format, vk::ImageUsageFlags::COLOR_ATTACHMENT, vk::MemoryPropertyFlags::DEVICE_LOCAL, extent, sample_count)?))
+            Ok(make_arcmut(BnanImage::new(device.clone(), color_format, vk::ImageUsageFlags::COLOR_ATTACHMENT, vk::MemoryPropertyFlags::DEVICE_LOCAL, extent, sample_count, None)?))
         ).collect();
 
-        let color_images: [ArcMut<BnanImage>; FRAMES_IN_FLIGHT] = color_vec?.try_into().map_err(|_| anyhow!("something went wrong while creating depth images"))?;
+        let color_images: [ArcMut<BnanImage>; FRAMES_IN_FLIGHT] = color_vec?.try_into().map_err(|_| anyhow!("something went wrong while creating color images"))?;
+        
+        // Single-sample resolved depth images (for sampling in compute/task shaders)
+        let resolved_depth_vec: Result<Vec<_>> = (0..FRAMES_IN_FLIGHT).map(|_|
+            Ok(make_arcmut(BnanImage::new(device.clone(), depth_format, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED, vk::MemoryPropertyFlags::DEVICE_LOCAL, extent, vk::SampleCountFlags::TYPE_1, None)?))
+        ).collect();
+
+        let resolved_depth_images: [ArcMut<BnanImage>; FRAMES_IN_FLIGHT] = resolved_depth_vec?.try_into().map_err(|_| anyhow!("something went wrong while creating resolved depth images"))?;
 
         unsafe {
             let device_guard = device.lock().unwrap();
@@ -503,6 +570,30 @@ impl MeshletSystem {
             for image in &color_images {
                 builder.transition_image_layout(image.lock().unwrap().image, vk::ImageLayout::UNDEFINED, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, None, None, None)?;
             }
+            
+            // Resolved depth images: transition to SHADER_READ_ONLY_OPTIMAL with explicit DEPTH aspect
+            for image in &resolved_depth_images {
+                let subresource_range = vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::DEPTH)
+                    .base_mip_level(0)
+                    .level_count(1)
+                    .base_array_layer(0)
+                    .layer_count(1);
+                
+                let barrier = vk::ImageMemoryBarrier2::default()
+                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .new_layout(vk::ImageLayout::GENERAL)
+                    .image(image.lock().unwrap().image)
+                    .subresource_range(subresource_range)
+                    .src_access_mask(vk::AccessFlags2::NONE)
+                    .src_stage_mask(vk::PipelineStageFlags2::NONE)
+                    .dst_access_mask(vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE)
+                    .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED);
+                
+                builder.push_barrier(barrier);
+            }
 
             builder.record(&*device_guard, command_buffer);
 
@@ -510,7 +601,38 @@ impl MeshletSystem {
             device_guard.device.wait_for_fences(&[fence], true, u64::MAX)?;
         }
 
-        Ok((depth_images, color_images))
+        Ok((depth_images, color_images, resolved_depth_images))
+    }
+
+    fn create_framebuffer_image_handles(render_graph: ArcMut<BnanRenderGraph>, depth_images: [ArcMut<BnanImage>; FRAMES_IN_FLIGHT], color_images: [ArcMut<BnanImage>; FRAMES_IN_FLIGHT], resolved_depth_images: [ArcMut<BnanImage>; FRAMES_IN_FLIGHT]) -> (ResourceHandle, ResourceHandle, ResourceHandle) {
+        let mut render_graph_guard = render_graph.lock().unwrap();
+
+        let depth_handle = render_graph_guard.import_render_image("MeshletDepthBuffer", depth_images.clone());
+        let color_handle = render_graph_guard.import_render_image("MeshletColor", color_images.clone());
+        let resolved_depth_handle = render_graph_guard.import_render_image("ResolvedDepth", resolved_depth_images.clone());
+
+        {
+            let resource =render_graph_guard.resources.get_mut(&depth_handle.0).unwrap();
+
+            resource.current_layout = vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            resource.current_stage = vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS;
+        }
+
+        {
+            let resource =render_graph_guard.resources.get_mut(&color_handle.0).unwrap();
+
+            resource.current_layout = vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL;
+            resource.current_stage = vk::PipelineStageFlags2::FRAGMENT_SHADER;
+        }
+
+        {
+            let resource =render_graph_guard.resources.get_mut(&resolved_depth_handle.0).unwrap();
+
+            resource.current_layout = vk::ImageLayout::GENERAL;
+            resource.current_stage = vk::PipelineStageFlags2::ALL_COMMANDS;
+        }
+
+        (depth_handle, color_handle, resolved_depth_handle)
     }
 
     fn create_descriptor_set_layout(device: ArcMut<BnanDevice>) -> Result<BnanDescriptorSetLayout> {
@@ -522,11 +644,18 @@ impl MeshletSystem {
             .add_binding(4, vk::DescriptorType::STORAGE_BUFFER, vk::ShaderStageFlags::TASK_EXT | vk::ShaderStageFlags::MESH_EXT)
             .build(device)
     }
+
+    fn create_temporal_descriptor_set_layout(device: ArcMut<BnanDevice>) -> Result<BnanDescriptorSetLayout> {
+        BnanDescriptorSetLayoutBuilder::new(vk::DescriptorSetLayoutCreateFlags::empty())
+            .add_binding(0, vk::DescriptorType::COMBINED_IMAGE_SAMPLER, vk::ShaderStageFlags::TASK_EXT)
+            .build(device)
+    }
     
     fn create_descriptor_pool(device: ArcMut<BnanDevice>) -> Result<BnanDescriptorPool> {
-        BnanDescriptorPoolBuilder::new(FRAMES_IN_FLIGHT as u32, vk::DescriptorPoolCreateFlags::empty())
+        BnanDescriptorPoolBuilder::new(FRAMES_IN_FLIGHT as u32 * 2, vk::DescriptorPoolCreateFlags::empty())
             .add_pool_size(vk::DescriptorType::UNIFORM_BUFFER, FRAMES_IN_FLIGHT as u32)
-            .add_pool_size(vk::DescriptorType::STORAGE_BUFFER, FRAMES_IN_FLIGHT as u32 * 4) // 4 SSBOs per frame
+            .add_pool_size(vk::DescriptorType::STORAGE_BUFFER, FRAMES_IN_FLIGHT as u32 * 4)// 4 SSBOs per frame
+            .add_pool_size(vk::DescriptorType::COMBINED_IMAGE_SAMPLER, FRAMES_IN_FLIGHT as u32)
             .build(device)
     }
 
@@ -591,10 +720,39 @@ impl MeshletSystem {
         
         Ok(sets)
     }
-    
+
+    fn allocate_temporal_descriptor_sets(
+        device: ArcMut<BnanDevice>,
+        layout: &BnanDescriptorSetLayout,
+        pool: &BnanDescriptorPool,
+    ) -> Result<[vk::DescriptorSet; FRAMES_IN_FLIGHT]> {
+        let sets: Result<Vec<_>> = (0..FRAMES_IN_FLIGHT).map(|_frame| {BnanDescriptorWriter::new(layout).write(device.clone(), pool)}).collect();
+
+        let sets_vec = sets?;
+        let sets: [vk::DescriptorSet; FRAMES_IN_FLIGHT] = sets_vec.try_into()
+            .map_err(|_| anyhow!("failed to create descriptor sets"))?;
+
+        Ok(sets)
+    }
+
+    fn create_temporal_sampler(device: ArcMut<BnanDevice>) -> Result<vk::Sampler> {
+        let sampler_info = vk::SamplerCreateInfo::default()
+            .mag_filter(vk::Filter::LINEAR)
+            .min_filter(vk::Filter::LINEAR)
+            .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+            .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .min_lod(0.0)
+            .max_lod(0.0);
+
+        unsafe { Ok(device.lock().unwrap().device.create_sampler(&sampler_info, None)?) }
+    }
+
     fn create_pipeline(
         device: ArcMut<BnanDevice>, 
-        layout: &BnanDescriptorSetLayout, 
+        layout: &BnanDescriptorSetLayout,
+        temporal_layout: &BnanDescriptorSetLayout,
         color_format: vk::Format, 
         depth_format: vk::Format
     ) -> Result<BnanPipeline> {
@@ -603,7 +761,8 @@ impl MeshletSystem {
             .size(size_of::<u32>() as u32)
             .stage_flags(vk::ShaderStageFlags::TASK_EXT)];
 
-        let layouts = [layout.layout];
+        let layouts = [layout.layout, temporal_layout.layout];
+
         let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default()
             .set_layouts(&layouts)
             .push_constant_ranges(&push_constant_range);

@@ -200,6 +200,7 @@ impl<'a> BnanDescriptorWriter<'a> {
     pub fn overwrite(&self, device: ArcMut<BnanDevice>, pool: &BnanDescriptorPool, set: vk::DescriptorSet) {
         let mut writes = self.writes.clone();
 
+        if writes.is_empty() { return; }
         for write in &mut writes {
             write.dst_set = set;
         }

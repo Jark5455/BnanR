@@ -51,9 +51,10 @@ fn main() {
                 stage: vk::PipelineStageFlags2::TRANSFER,
                 layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                 resolve_target: None,
+                use_previous_frame: false,
             }
         ],
-        Box::new(move |_cmd, frame_info| {
+        Box::new(move |_graph, frame_info| {
             simple_system.borrow_mut().update_uniform_buffers(frame_info).unwrap();
             simple_system.borrow().draw(frame_info);
         })

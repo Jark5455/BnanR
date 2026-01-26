@@ -14,7 +14,7 @@ use crate::core::bnan_window::BnanWindow;
 
 lazy_static! {
     static ref ENTRY: Entry = unsafe { Entry::load().unwrap() };
-    static ref DEVICE_EXTENSIONS: Vec<&'static CStr> = vec![c"VK_KHR_swapchain", c"VK_KHR_dynamic_rendering", c"VK_EXT_descriptor_indexing", c"VK_EXT_mesh_shader"];
+    static ref DEVICE_EXTENSIONS: Vec<&'static CStr> = vec![c"VK_KHR_swapchain", c"VK_KHR_dynamic_rendering", c"VK_KHR_push_descriptor", c"VK_EXT_descriptor_indexing", c"VK_EXT_mesh_shader"];
     static ref VALIDATION_LAYERS: Vec<&'static CStr> = vec![c"VK_LAYER_KHRONOS_validation"];
 }
 
@@ -135,6 +135,12 @@ impl BnanBarrierBuilder {
 
         self.image_barriers.push(barrier);
         Ok(self)
+    }
+    
+    /// Push a pre-built image memory barrier directly
+    pub fn push_barrier(&mut self, barrier: vk::ImageMemoryBarrier2<'static>) -> &mut Self {
+        self.image_barriers.push(barrier);
+        self
     }
     
     pub fn flush_writes(
@@ -319,7 +325,7 @@ impl BnanDevice {
     
     pub fn build_image_transition_barrier(image: vk::Image, old_layout: vk::ImageLayout, new_layout: vk::ImageLayout, undefined_exec_stage: Option<vk::PipelineStageFlags2>, levels: Option<u32>, layers: Option<u32>) -> Result<vk::ImageMemoryBarrier2<'static>> {
 
-        let aspect_mask = match new_layout == vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL {
+        let aspect_mask = match new_layout == vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL || old_layout == vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL {
             true => {vk::ImageAspectFlags::DEPTH}
             false => {vk::ImageAspectFlags::COLOR}
         };
@@ -333,6 +339,7 @@ impl BnanDevice {
 
         let (src_access_mask, src_stage_mask) = match old_layout {
             vk::ImageLayout::UNDEFINED => (vk::AccessFlags2::NONE, undefined_exec_stage.unwrap_or(vk::PipelineStageFlags2::NONE)),
+            vk::ImageLayout::GENERAL => (vk::AccessFlags2::SHADER_STORAGE_WRITE, vk::PipelineStageFlags2::ALL_COMMANDS),
             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL => (vk::AccessFlags2::COLOR_ATTACHMENT_WRITE, vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT),
             vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL => (vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE, vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS),
             vk::ImageLayout::TRANSFER_SRC_OPTIMAL => (vk::AccessFlags2::TRANSFER_READ, vk::PipelineStageFlags2::TRANSFER),
@@ -342,7 +349,7 @@ impl BnanDevice {
         };
 
         let (dst_access_mask, dst_stage_mask) = match new_layout {
-            vk::ImageLayout::GENERAL => (vk::AccessFlags2::MEMORY_WRITE, vk::PipelineStageFlags2::ALL_COMMANDS),
+            vk::ImageLayout::GENERAL => (vk::AccessFlags2::SHADER_STORAGE_WRITE, vk::PipelineStageFlags2::ALL_COMMANDS),
             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL => (vk::AccessFlags2::COLOR_ATTACHMENT_WRITE, vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT),
             vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL => (vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE, vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS),
             vk::ImageLayout::TRANSFER_SRC_OPTIMAL => (vk::AccessFlags2::TRANSFER_READ, vk::PipelineStageFlags2::TRANSFER),
@@ -626,7 +633,15 @@ impl BnanDevice {
 
         unsafe {
             for device in instance.enumerate_physical_devices()? {
-                if Self::is_device_suitable(instance, surface, device)? {
+
+                let mut subgroup_properties = vk::PhysicalDeviceSubgroupProperties::default();
+
+                let mut properties2 = vk::PhysicalDeviceProperties2::default()
+                    .push_next(&mut subgroup_properties);
+
+                let props = instance.get_physical_device_properties2(device, &mut properties2);
+
+                if Self::is_device_suitable(instance, surface, device)? && subgroup_properties.supported_operations.contains(vk::SubgroupFeatureFlags::BALLOT) {
                     physical_device = device;
                     break;
                 }

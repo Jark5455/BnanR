@@ -38,6 +38,68 @@ layout(push_constant) uniform Push {
     uint meshlet_count;
 } push;
 
+layout(set = 1, binding = 0) uniform sampler2D hzb_texture;
+
+// Returns TRUE if the sphere is completely hidden by geometry
+bool IsOccluded(vec3 center, float radius) {
+    // 1. Transform Center to View Space
+    vec4 view_pos = ubo.view * vec4(center, 1.0);
+
+    // Safety: If the sphere is intersecting or behind the near plane, don't cull it.
+    // (View Space Z is negative looking forward. Near plane is usually small negative, e.g., -0.1)
+    if (view_pos.z > -radius) return false;
+
+    // 2. Calculate the "Closest Depth" of the sphere
+    // We want the point on the sphere CLOSEST to the camera.
+    // Approximation: Move the center along the view vector towards the camera.
+    vec3 front_point_view = view_pos.xyz;
+    front_point_view.z += radius;
+
+    // Project this point to NDC (Normalized Device Coordinates) to get the depth value.
+    vec4 clip_pos = ubo.projection * vec4(front_point_view, 1.0);
+    float closest_depth_ndc = clip_pos.z / clip_pos.w;
+
+    // 3. Project the Radius to Screen Space
+    // We need to know how big the sphere is in pixels to pick the right Mip Level.
+    // Formula: ProjectedRadius = Radius * (FocalLength / Depth)
+    // ubo.projection[1][1] is the Focal Length (cot(FOV/2)).
+    float proj_radius_uv = (radius * abs(ubo.projection[1][1])) / -view_pos.z;
+
+    // 4. Calculate Mip Level
+    // We want a mip level where the sphere covers roughly 4 pixels (2x2 block).
+    // This ensures our single texture sample covers the whole object area safely.
+    vec2 tex_size = vec2(textureSize(hzb_texture, 0));
+
+    // Convert UV radius to pixel diameter
+    float pixel_diameter = proj_radius_uv * max(tex_size.x, tex_size.y) * 2.0;
+
+    // Calculate mip: log2(pixels) tells us which power-of-two reduction makes it ~1 pixel
+    float mip = floor(log2(pixel_diameter));
+
+    // Clamp to valid range (0 to MaxMip)
+    float max_mip = float(textureQueryLevels(hzb_texture) - 1);
+    mip = clamp(mip, 0.0, max_mip);
+
+    // 5. Sample the HZB
+    // We project the center to find the UV coordinate to sample.
+    vec4 center_clip = ubo.projection * view_pos;
+    vec3 center_ndc = center_clip.xyz / center_clip.w;
+    vec2 uv = center_ndc.xy * 0.5 + 0.5;
+
+    // Read the "Furthest Depth" in that region from the HZB
+    float hzb_depth = textureLod(hzb_texture, uv, mip).r;
+
+    // 6. Compare
+    // STANDARD Z (0=Near, 1=Far):
+    // If our object (closest_depth_ndc) is > HZB (furthest_depth),
+    // it means our object is FURTHER away than the furthest thing in the wall.
+    // Therefore, it is occluded.
+    return closest_depth_ndc > hzb_depth;
+
+    // REVERSE Z (1=Near, 0=Far):
+    // return closest_depth_ndc < hzb_depth;
+}
+
 bool IsVisible(vec3 center, float radius) {
     for (int i = 0; i < 6; i++) {
         float dist = dot(ubo.frustumPlanes[i].xyz, center) + ubo.frustumPlanes[i].w;
@@ -46,6 +108,11 @@ bool IsVisible(vec3 center, float radius) {
             return false;
         }
     }
+
+    if (IsOccluded(center, radius)) {
+        return false;
+    }
+
     return true;
 }
 

@@ -132,9 +132,14 @@ impl Drop for BnanPipeline {
 
 impl BnanPipeline {
     
-    pub fn new_compute_pipeline(device: ArcMut<BnanDevice>, shader_filepath: String, descriptor_set_layouts: Vec<vk::DescriptorSetLayout>) -> Result<BnanPipeline> {
+    pub fn new_compute_pipeline(
+        device: ArcMut<BnanDevice>, 
+        shader_filepath: String, 
+        descriptor_set_layouts: Vec<vk::DescriptorSetLayout>,
+        push_constant_ranges: Option<Vec<vk::PushConstantRange>>,
+    ) -> Result<BnanPipeline> {
         let shader_module = Self::load_shader_module(device.clone(), shader_filepath)?;
-        let pipeline_layout = Self::create_pipeline_layout(device.clone(), descriptor_set_layouts)?;
+        let pipeline_layout = Self::create_pipeline_layout(device.clone(), descriptor_set_layouts, push_constant_ranges)?;
         let pipeline = Self::create_compute_pipeline(device.clone(), shader_module, pipeline_layout)?;
         
         Ok(BnanPipeline {
@@ -190,10 +195,14 @@ impl BnanPipeline {
         unsafe { Ok(device.lock().unwrap().device.create_shader_module(&info, None)?) }
     }
 
-    fn create_pipeline_layout(device: ArcMut<BnanDevice>, descriptor_set_layouts: Vec<vk::DescriptorSetLayout>) -> Result<vk::PipelineLayout> {
-        
-        let info = vk::PipelineLayoutCreateInfo::default()
+    fn create_pipeline_layout(device: ArcMut<BnanDevice>, descriptor_set_layouts: Vec<vk::DescriptorSetLayout>, push_constant_ranges: Option<Vec<vk::PushConstantRange>>) -> Result<vk::PipelineLayout> {
+        let mut info = vk::PipelineLayoutCreateInfo::default()
             .set_layouts(&descriptor_set_layouts);
+        
+        let ranges = push_constant_ranges.unwrap_or_default();
+        if !ranges.is_empty() {
+            info = info.push_constant_ranges(&ranges);
+        }
 
         unsafe { Ok(device.lock().unwrap().device.create_pipeline_layout(&info, None)?) }
     }
