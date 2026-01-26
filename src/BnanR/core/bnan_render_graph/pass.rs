@@ -1,17 +1,43 @@
-use ash::vk;
+
 
 use crate::core::bnan_render_graph::graph::BnanRenderGraph;
 use crate::core::bnan_rendering::BnanFrameInfo;
-use crate::core::bnan_render_graph::resource::ResourceHandle;
+use crate::core::bnan_render_graph::resource::{ResourceHandle, ResourceUsage};
 
 pub struct RenderPassResource {
     pub handle: ResourceHandle,
-    pub stage: vk::PipelineStageFlags2,
-    pub layout: vk::ImageLayout,
+    pub usage: ResourceUsage,
     pub resolve_target: Option<ResourceHandle>,
-    /// If true, use the previous frame's image instead of the current frame's.
-    /// Useful for temporal effects like occlusion culling with Hi-Z from frame N-1.
-    pub use_previous_frame: bool,
+    pub is_temporal: bool,
+}
+
+impl RenderPassResource {
+    pub fn new(handle: ResourceHandle, usage: ResourceUsage) -> Self {
+        Self {
+            handle,
+            usage,
+            resolve_target: None,
+            is_temporal: false,
+        }
+    }
+    
+    pub fn with_resolve(handle: ResourceHandle, usage: ResourceUsage, resolve: ResourceHandle) -> Self {
+        Self {
+            handle,
+            usage,
+            resolve_target: Some(resolve),
+            is_temporal: false,
+        }
+    }
+    
+    pub fn temporal(handle: ResourceHandle, usage: ResourceUsage) -> Self {
+        Self {
+            handle,
+            usage,
+            resolve_target: None,
+            is_temporal: true,
+        }
+    }
 }
 
 pub struct RenderPass {

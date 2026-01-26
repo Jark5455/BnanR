@@ -8,6 +8,7 @@ use BnanR::core::bnan_swapchain::BnanSwapchain;
 use BnanR::core::bnan_window::{BnanWindow, WindowObserver};
 use BnanR::core::bnan_render_graph::graph::BnanRenderGraph;
 use BnanR::core::bnan_render_graph::pass::{RenderPass, RenderPassResource};
+use BnanR::core::bnan_render_graph::resource::ResourceUsage;
 
 use crate::simple_system::SimpleSystem;
 
@@ -46,13 +47,7 @@ fn main() {
         "Raytrace Pass".to_string(),
         vec![],
         vec![
-            RenderPassResource {
-                handle: backbuffer_handle,
-                stage: vk::PipelineStageFlags2::TRANSFER,
-                layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                resolve_target: None,
-                use_previous_frame: false,
-            }
+            RenderPassResource::new(backbuffer_handle, ResourceUsage::TransferDst),
         ],
         Box::new(move |_graph, frame_info| {
             simple_system.borrow_mut().update_uniform_buffers(frame_info).unwrap();

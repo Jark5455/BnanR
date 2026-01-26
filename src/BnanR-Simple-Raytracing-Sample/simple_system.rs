@@ -141,7 +141,7 @@ impl WindowObserver<(i32, i32)> for SimpleSystem {
             let mut builder = BnanBarrierBuilder::new();
 
             for image in &images {
-                builder.transition_image_layout(image.image, vk::ImageLayout::UNDEFINED, vk::ImageLayout::GENERAL, None, None, None).unwrap();
+                builder.transition_image_layout(image.image, vk::ImageLayout::UNDEFINED, vk::ImageLayout::GENERAL, None, None).unwrap();
             }
 
             builder.record(&*device_guard, command_buffer);
@@ -375,7 +375,7 @@ impl SimpleSystem {
             let mut builder = BnanBarrierBuilder::new();
 
             for image in &images {
-                builder.transition_image_layout(image.image, vk::ImageLayout::UNDEFINED, vk::ImageLayout::GENERAL, None, None, None)?;
+                builder.transition_image_layout(image.image, vk::ImageLayout::UNDEFINED, vk::ImageLayout::GENERAL, None, None)?;
             }
 
             builder.record(&*device_guard, command_buffer);

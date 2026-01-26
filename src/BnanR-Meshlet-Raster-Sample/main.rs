@@ -11,8 +11,8 @@ use BnanR::core::bnan_device::BnanDevice;
 use BnanR::core::bnan_swapchain::BnanSwapchain;
 use BnanR::core::bnan_window::{BnanWindow, WindowObserver};
 use BnanR::core::bnan_render_graph::graph::BnanRenderGraph;
-use BnanR::core::bnan_render_graph::pass::RenderPass;
-use BnanR::core::bnan_render_graph::pass::RenderPassResource;
+use BnanR::core::bnan_render_graph::pass::{RenderPassResource, RenderPass};
+use BnanR::core::bnan_render_graph::resource::ResourceUsage;
 use crate::downsample_system::DownsampleSystem;
 use crate::meshlet_system::MeshletSystem;
 
@@ -72,29 +72,11 @@ fn main() {
     let main_pass = RenderPass::new(
         "Main Render Pass".to_string(),
         vec![
-            RenderPassResource {
-                handle: hiz_handle.clone(),
-                stage: vk::PipelineStageFlags2::TASK_SHADER_EXT,
-                layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                resolve_target: None,
-                use_previous_frame: true,
-            },
+            RenderPassResource::temporal(hiz_handle.clone(), ResourceUsage::ShaderRead),
         ],
         vec![
-            RenderPassResource {
-                handle: depth_handle,
-                stage: vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS,
-                layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                resolve_target: Some(resolved_depth_handle.clone()),
-                use_previous_frame: false,
-            },
-            RenderPassResource {
-                handle: color_handle,
-                stage: vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
-                layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                resolve_target: Some(backbuffer),
-                use_previous_frame: false,
-            },
+            RenderPassResource::with_resolve(depth_handle, ResourceUsage::DepthStencilAttachment, resolved_depth_handle.clone()),
+            RenderPassResource::with_resolve(color_handle, ResourceUsage::ColorAttachment, backbuffer),
         ],
         
         Box::new(move |_graph, frame_info| {
@@ -104,30 +86,14 @@ fn main() {
         })
     );
 
-
-
     let downsample_pass = RenderPass::new(
         "Downsampling Compute Pass".to_string(),
         vec![
-            RenderPassResource {
-                handle: resolved_depth_handle,
-                stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
-                layout: vk::ImageLayout::GENERAL,
-                resolve_target: None,
-                use_previous_frame: false,
-            }
+            RenderPassResource::new(resolved_depth_handle, ResourceUsage::StorageRead),
         ],
-
         vec![
-            RenderPassResource {
-                handle: hiz_handle,
-                stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
-                layout: vk::ImageLayout::GENERAL,
-                resolve_target: None,
-                use_previous_frame: false,
-            }
+            RenderPassResource::new(hiz_handle, ResourceUsage::StorageWrite),
         ],
-
         Box::new(move |graph, frame_info| {
             downsample_system.borrow().dispatch(graph, frame_info);
         })

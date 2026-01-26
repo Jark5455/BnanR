@@ -10,7 +10,7 @@ use crate::core::bnan_device::{BnanBarrierBuilder, BnanDevice};
 use crate::core::bnan_swapchain::BnanSwapchain;
 use crate::core::bnan_window::BnanWindow;
 use crate::core::bnan_rendering::{BnanFrameInfo, FRAMES_IN_FLIGHT}; 
-use crate::core::bnan_render_graph::resource::{ResourceHandle, ResourceType, PhysicalResource};
+use crate::core::bnan_render_graph::resource::{ResourceHandle, ResourceType, PhysicalResource, ResourceUsage};
 use crate::core::bnan_render_graph::pass::RenderPass;
 use crate::core::bnan_image::BnanImage;
 
@@ -161,8 +161,6 @@ impl BnanRenderGraph {
         self.swapchain_resource_handle.clone().unwrap()
     }
 
-    /// Retrieves the underlying image for a given resource handle and frame index.
-    /// Returns None if the handle doesn't exist or isn't an image resource.
     pub fn get_image(&self, handle: &ResourceHandle, frame: usize) -> Option<ArcMut<BnanImage>> {
         self.resources.get(&handle.0).and_then(|physical| {
             match &physical.resource {
@@ -173,9 +171,6 @@ impl BnanRenderGraph {
         })
     }
 
-    /// Retrieves all per-frame images for a given resource handle.
-    /// Useful for setting up descriptors for all frames in flight before the render loop.
-    /// Returns None if the handle doesn't exist or isn't a per-frame image resource.
     pub fn get_images(&self, handle: &ResourceHandle) -> Option<[ArcMut<BnanImage>; FRAMES_IN_FLIGHT]> {
         self.resources.get(&handle.0).and_then(|physical| {
             match &physical.resource {
@@ -185,8 +180,6 @@ impl BnanRenderGraph {
         })
     }
 
-    /// Retrieves the previous frame's image for a given resource handle.
-    /// Useful for temporal effects like occlusion culling with Hi-Z from frame N-1.
     pub fn get_previous_frame_image(&self, handle: &ResourceHandle, current_frame: usize) -> Option<ArcMut<BnanImage>> {
         let prev_frame = (current_frame + FRAMES_IN_FLIGHT - 1) % FRAMES_IN_FLIGHT;
         self.get_image(handle, prev_frame)
@@ -217,24 +210,27 @@ impl BnanRenderGraph {
     pub fn add_pass(&mut self, pass: RenderPass) {
         self.passes.push(pass);
     }
-    
-    /// Helper to get access flags and stage for a layout+stage combination.
-    /// Returns correct stage for each access type, with special handling for depth resolve.
-    fn get_access_and_stage_for_layout_and_stage(
-        layout: vk::ImageLayout,
-        tracked_stage: vk::PipelineStageFlags2,
+
+    fn get_src_access_and_stage(
+        current_layout: vk::ImageLayout,
+        current_stage: vk::PipelineStageFlags2,
+        is_swapchain: bool,
     ) -> (vk::AccessFlags2, vk::PipelineStageFlags2) {
-        match layout {
-            vk::ImageLayout::UNDEFINED => (vk::AccessFlags2::NONE, tracked_stage),
+        // Swapchain from UNDEFINED syncs with acquire semaphore at COLOR_ATTACHMENT_OUTPUT
+        if is_swapchain && current_layout == vk::ImageLayout::UNDEFINED {
+            return (vk::AccessFlags2::NONE, vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT);
+        }
+        
+        match current_layout {
+            vk::ImageLayout::UNDEFINED => (vk::AccessFlags2::NONE, current_stage),
             vk::ImageLayout::GENERAL => (vk::AccessFlags2::SHADER_STORAGE_WRITE, vk::PipelineStageFlags2::ALL_COMMANDS),
             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL => (vk::AccessFlags2::COLOR_ATTACHMENT_WRITE, vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT),
             vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL => {
-                // Use the tracked stage to determine access - critical for depth resolve
-                if tracked_stage == vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT {
-                    // Written by resolve operation at COLOR_ATTACHMENT_OUTPUT
+                // Depth resolve uses COLOR_ATTACHMENT_OUTPUT stage with COLOR_ATTACHMENT_WRITE access
+                if current_stage == vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT {
                     (vk::AccessFlags2::COLOR_ATTACHMENT_WRITE, vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
                 } else {
-                    // Written by depth test at EARLY_FRAGMENT_TESTS
+                    // Regular depth test uses EARLY_FRAGMENT_TESTS with depth access
                     (vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE, vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS)
                 }
             },
@@ -242,7 +238,24 @@ impl BnanRenderGraph {
             vk::ImageLayout::TRANSFER_DST_OPTIMAL => (vk::AccessFlags2::TRANSFER_WRITE, vk::PipelineStageFlags2::TRANSFER),
             vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL => (vk::AccessFlags2::SHADER_READ, vk::PipelineStageFlags2::FRAGMENT_SHADER),
             vk::ImageLayout::PRESENT_SRC_KHR => (vk::AccessFlags2::NONE, vk::PipelineStageFlags2::NONE),
-            _ => (vk::AccessFlags2::NONE, tracked_stage),
+            _ => (vk::AccessFlags2::NONE, current_stage),
+        }
+    }
+    
+    fn get_aspect_mask_for_format(format: vk::Format) -> vk::ImageAspectFlags {
+        match format {
+            // Depth-only formats
+            vk::Format::D16_UNORM | vk::Format::D32_SFLOAT | vk::Format::X8_D24_UNORM_PACK32 => {
+                vk::ImageAspectFlags::DEPTH
+            }
+            // Depth-stencil formats
+            vk::Format::D16_UNORM_S8_UINT | vk::Format::D24_UNORM_S8_UINT | vk::Format::D32_SFLOAT_S8_UINT => {
+                vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
+            }
+            // Stencil-only
+            vk::Format::S8_UINT => vk::ImageAspectFlags::STENCIL,
+            // Everything else is color
+            _ => vk::ImageAspectFlags::COLOR,
         }
     }
     
@@ -342,273 +355,245 @@ impl BnanRenderGraph {
         };
 
         for pass in &self.passes {
-             let device = self.device.lock().unwrap();
-             let mut barrier_builder = BnanBarrierBuilder::new();
-             
-             let mut process_resource = |handle: &ResourceHandle, required_stage: vk::PipelineStageFlags2, required_layout: vk::ImageLayout, use_frame: usize, builder: &mut BnanBarrierBuilder| {
-                 if let Some(physical) = self.resources.get_mut(&handle.0) {
-                     let mut needs_barrier = false;
-                     
-                     let is_image = matches!(&physical.resource, ResourceType::SwapchainImage(_) | ResourceType::Image(_));
-                     if is_image && physical.current_layout != required_layout {
-                         needs_barrier = true;
-                     }
-                     
-                     if physical.current_stage != required_stage {
-                         needs_barrier = true;
-                     }
-                     
-                     if needs_barrier {
-                         match &physical.resource {
-                             ResourceType::SwapchainImage(image_arc) => {
-                                 let image = image_arc.lock().unwrap();
-                                 
-                                 // For swapchain images from UNDEFINED, use COLOR_ATTACHMENT_OUTPUT
-                                 // to synchronize with acquire semaphore wait
-                                 let (src_access, src_stage) = if physical.current_layout == vk::ImageLayout::UNDEFINED {
-                                     (vk::AccessFlags2::NONE, vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
-                                 } else {
-                                     Self::get_access_and_stage_for_layout_and_stage(
-                                         physical.current_layout, physical.current_stage
-                                     )
-                                 };
-                                 let (dst_access, dst_stage) = Self::get_access_and_stage_for_layout_and_stage(
-                                     required_layout, required_stage
-                                 );
-                                 
-                                 let barrier = vk::ImageMemoryBarrier2::default()
-                                     .old_layout(physical.current_layout)
-                                     .new_layout(required_layout)
-                                     .image(image.image)
-                                     .subresource_range(vk::ImageSubresourceRange {
-                                         aspect_mask: vk::ImageAspectFlags::COLOR,
-                                         base_mip_level: 0,
-                                         level_count: 1,
-                                         base_array_layer: 0,
-                                         layer_count: 1,
-                                     })
-                                     .src_access_mask(src_access)
-                                     .src_stage_mask(src_stage)
-                                     .dst_access_mask(dst_access)
-                                     .dst_stage_mask(dst_stage)
-                                     .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                                     .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED);
-                                 
-                                 builder.push_barrier(barrier);
-                             },
-                             
-                             ResourceType::Image(images) => {
-                                 let image = images[use_frame].lock().unwrap();
-                                 
-                                 // Build custom barrier using tracked stage instead of layout-derived stage
-                                 let (src_access, src_stage) = Self::get_access_and_stage_for_layout_and_stage(
-                                     physical.current_layout, physical.current_stage
-                                 );
-                                 let (dst_access, dst_stage) = Self::get_access_and_stage_for_layout_and_stage(
-                                     required_layout, required_stage
-                                 );
-                                 
-                                 let aspect_mask = if required_layout == vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL 
-                                     || physical.current_layout == vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL {
-                                     vk::ImageAspectFlags::DEPTH
-                                 } else {
-                                     vk::ImageAspectFlags::COLOR
-                                 };
-                                 
-                                 let barrier = vk::ImageMemoryBarrier2::default()
-                                     .old_layout(physical.current_layout)
-                                     .new_layout(required_layout)
-                                     .image(image.image)
-                                     .subresource_range(vk::ImageSubresourceRange {
-                                         aspect_mask,
-                                         base_mip_level: 0,
-                                         level_count: image.mip_levels,
-                                         base_array_layer: 0,
-                                         layer_count: 1,
-                                     })
-                                     .src_access_mask(src_access)
-                                     .src_stage_mask(src_stage)
-                                     .dst_access_mask(dst_access)
-                                     .dst_stage_mask(dst_stage)
-                                     .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                                     .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED);
-                                 
-                                 builder.push_barrier(barrier);
-                             },
-                             
-                             ResourceType::Buffer(_) => {
-                                 todo!("Buffer barriers")
-                             }
-                         }
-                         
-                         physical.current_layout = required_layout;
-                         physical.current_stage = required_stage;
-                     }
-                 }
-             };
+            {
+                let device = self.device.lock().unwrap();
+                let mut barrier_builder = BnanBarrierBuilder::new();
 
-             for input in &pass.inputs {
-                 let use_frame = if input.use_previous_frame {
-                     (frame_info.frame_index + (FRAMES_IN_FLIGHT - 1)) % FRAMES_IN_FLIGHT
-                 } else {
-                     frame_info.frame_index
-                 };
+                // Process a resource usage, emitting barriers as needed
+                let mut process_resource = |handle: &ResourceHandle, usage: ResourceUsage, use_frame: usize, builder: &mut BnanBarrierBuilder| {
+                    let (required_stage, required_access) = usage.get_stage_and_access();
+                    let required_layout = usage.get_layout();
+
+                    if let Some(physical) = self.resources.get_mut(&handle.0) {
+                        let is_image = matches!(&physical.resource, ResourceType::SwapchainImage(_) | ResourceType::Image(_));
+                        let needs_barrier = (is_image && physical.current_layout != required_layout)
+                            || physical.current_stage != required_stage;
+
+                        if needs_barrier {
+                            match &physical.resource {
+                                ResourceType::SwapchainImage(image_arc) => {
+                                    let image = image_arc.lock().unwrap();
+                                    let (src_access, src_stage) = Self::get_src_access_and_stage(
+                                        physical.current_layout, physical.current_stage, true
+                                    );
+
+                                    let barrier = vk::ImageMemoryBarrier2::default()
+                                        .old_layout(physical.current_layout)
+                                        .new_layout(required_layout)
+                                        .image(image.image)
+                                        .subresource_range(vk::ImageSubresourceRange {
+                                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                                            base_mip_level: 0,
+                                            level_count: 1,
+                                            base_array_layer: 0,
+                                            layer_count: 1,
+                                        })
+                                        .src_access_mask(src_access)
+                                        .src_stage_mask(src_stage)
+                                        .dst_access_mask(required_access)
+                                        .dst_stage_mask(required_stage)
+                                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED);
+
+                                    builder.push_barrier(barrier);
+                                },
+
+                                ResourceType::Image(images) => {
+                                    let image = images[use_frame].lock().unwrap();
+                                    let (src_access, src_stage) = Self::get_src_access_and_stage(
+                                        physical.current_layout, physical.current_stage, false
+                                    );
+
+                                    // Detect aspect from image format, not usage
+                                    let aspect_mask = Self::get_aspect_mask_for_format(image.format);
+
+                                    let barrier = vk::ImageMemoryBarrier2::default()
+                                        .old_layout(physical.current_layout)
+                                        .new_layout(required_layout)
+                                        .image(image.image)
+                                        .subresource_range(vk::ImageSubresourceRange {
+                                            aspect_mask,
+                                            base_mip_level: 0,
+                                            level_count: image.mip_levels,
+                                            base_array_layer: 0,
+                                            layer_count: 1,
+                                        })
+                                        .src_access_mask(src_access)
+                                        .src_stage_mask(src_stage)
+                                        .dst_access_mask(required_access)
+                                        .dst_stage_mask(required_stage)
+                                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED);
+
+                                    builder.push_barrier(barrier);
+                                },
+
+                                ResourceType::Buffer(_) => {
+                                    todo!("Buffer barriers")
+                                }
+                            }
+
+                            physical.current_layout = required_layout;
+                            physical.current_stage = required_stage;
+                        }
+                    }
+                };
+
+                // Process inputs
+                for input in &pass.inputs {
+                    let use_frame = if input.is_temporal {
+                        (frame_info.frame_index + (FRAMES_IN_FLIGHT - 1)) % FRAMES_IN_FLIGHT
+                    } else {
+                        frame_info.frame_index
+                    };
+                    process_resource(&input.handle, input.usage, use_frame, &mut barrier_builder);
+                }
+
+                // Process outputs and resolve targets
+                for output in &pass.outputs {
+                    process_resource(&output.handle, output.usage, frame_info.frame_index, &mut barrier_builder);
+
+                    if let Some(resolve_handle) = &output.resolve_target {
+                        // Resolve targets use DepthStencilResolve for depth, ColorAttachment for color
+                        let resolve_usage = match output.usage {
+                            ResourceUsage::DepthStencilAttachment => ResourceUsage::DepthStencilResolve,
+                            _ => ResourceUsage::ColorAttachment,
+                        };
+                        process_resource(resolve_handle, resolve_usage, frame_info.frame_index, &mut barrier_builder);
+                    }
+                }
+
+                barrier_builder.record(&device, command_buffer);
+            }
+
+            let mut is_dynamic_rendering = false;
+            let mut color_attachments = Vec::new();
+            let mut depth_attachment: Option<vk::RenderingAttachmentInfo> = None;
+            let mut render_extent: Option<vk::Extent2D> = None;
+             
+            for output in &pass.outputs {
+                if matches!(output.usage, ResourceUsage::ColorAttachment) {
+                    if let Some(physical) = self.resources.get(&output.handle.0) {
+                        let image_guard = match &physical.resource {
+                            ResourceType::SwapchainImage(image_arc) => Some(image_arc.lock().unwrap()),
+                            ResourceType::Image(images) => Some(images[frame_info.frame_index].lock().unwrap()),
+                            ResourceType::Buffer(_) => None,
+                        };
+                        if let Some(image) = image_guard {
+
+                            let mut clear_value = vk::ClearValue::default();
+                            clear_value.color = CLEAR_COLOR;
+
+                            let mut attachment = vk::RenderingAttachmentInfo::default()
+                                .image_view(image.image_view)
+                                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                                .load_op(vk::AttachmentLoadOp::CLEAR)
+                                .store_op(vk::AttachmentStoreOp::STORE)
+                                .clear_value(clear_value);
+                             
+                            if let Some(resolve_handle) = &output.resolve_target {
+                                if let Some(resolve_physical) = self.resources.get(&resolve_handle.0) {
+                                    let resolve_image_guard = match &resolve_physical.resource {
+                                        ResourceType::SwapchainImage(image_arc) => Some(image_arc.lock().unwrap()),
+                                        ResourceType::Image(images) => Some(images[frame_info.frame_index].lock().unwrap()),
+                                        ResourceType::Buffer(_) => None,
+                                    };
+                                    if let Some(resolve_image) = resolve_image_guard {
+                                        attachment = attachment
+                                            .resolve_image_view(resolve_image.image_view)
+                                            .resolve_image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                                            .resolve_mode(vk::ResolveModeFlags::AVERAGE);
+                                    }
+                                }
+                            }
+                             
+                            color_attachments.push(attachment);
+                            is_dynamic_rendering = true;
+                             
+                            if render_extent.is_none() {
+                                render_extent = Some(vk::Extent2D {
+                                    width: image.image_extent.width,
+                                    height: image.image_extent.height,
+                                });
+                            }
+                        }
+                    }
+                } else if matches!(output.usage, ResourceUsage::DepthStencilAttachment) {
+                    if let Some(physical) = self.resources.get(&output.handle.0) {
+                        let image_guard = match &physical.resource {
+                            ResourceType::SwapchainImage(image_arc) => Some(image_arc.lock().unwrap()),
+                            ResourceType::Image(images) => Some(images[frame_info.frame_index].lock().unwrap()),
+                            ResourceType::Buffer(_) => None,
+                        };
+
+                        if let Some(image) = image_guard {
+
+                            let mut clear_value = vk::ClearValue::default();
+                            clear_value.depth_stencil = CLEAR_DEPTH_STENCIL;
+
+                            let mut depth_att = vk::RenderingAttachmentInfo::default()
+                                .image_view(image.image_view)
+                                .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                                .load_op(vk::AttachmentLoadOp::CLEAR)
+                                .store_op(vk::AttachmentStoreOp::STORE)
+                                .clear_value(clear_value);
+                             
+                            if let Some(resolve_handle) = &output.resolve_target {
+                                if let Some(resolve_physical) = self.resources.get(&resolve_handle.0) {
+                                    let resolve_image_guard = match &resolve_physical.resource {
+                                        ResourceType::SwapchainImage(image_arc) => Some(image_arc.lock().unwrap()),
+                                        ResourceType::Image(images) => Some(images[frame_info.frame_index].lock().unwrap()),
+                                        ResourceType::Buffer(_) => None,
+                                    };
+
+                                    if let Some(resolve_image) = resolve_image_guard {
+                                        depth_att = depth_att
+                                            .resolve_image_view(resolve_image.image_view)
+                                            .resolve_image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                                            .resolve_mode(vk::ResolveModeFlags::MAX);
+                                    }
+                                }
+                            }
+                             
+                            depth_attachment = Some(depth_att);
+                             
+                            is_dynamic_rendering = true;
+                             
+                            if render_extent.is_none() {
+                                render_extent = Some(vk::Extent2D {
+                                    width: image.image_extent.width,
+                                    height: image.image_extent.height,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+             
+            if is_dynamic_rendering {
+                let extent = render_extent.unwrap_or(swapchain_extent);
                  
-                 process_resource(&input.handle, input.stage, input.layout, use_frame, &mut barrier_builder);
-             }
-             
-             for output in &pass.outputs {
-                 process_resource(&output.handle, output.stage, output.layout, frame_info.frame_index, &mut barrier_builder);
-                 
-                 if let Some(resolve_handle) = &output.resolve_target {
-                     // All resolves (color and depth) happen at COLOR_ATTACHMENT_OUTPUT stage
-                     let resolve_layout = match output.layout {
-                         vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL => vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                         _ => vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                     };
-                     process_resource(
-                         resolve_handle,
-                         vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
-                         resolve_layout,
-                         frame_info.frame_index,
-                         &mut barrier_builder
-                     );
-                 }
-             }
-
-             barrier_builder.record(&device, command_buffer);
-             
-             drop(device); // Drop lock before execute
-             
-             let mut is_dynamic_rendering = false;
-             let mut color_attachments = Vec::new();
-             let mut depth_attachment: Option<vk::RenderingAttachmentInfo> = None;
-             let mut render_extent: Option<vk::Extent2D> = None;
-             
-             for output in &pass.outputs {
-                 if output.layout == vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL {
-                     if let Some(physical) = self.resources.get(&output.handle.0) {
-                         let image_guard = match &physical.resource {
-                             ResourceType::SwapchainImage(image_arc) => Some(image_arc.lock().unwrap()),
-                             ResourceType::Image(images) => Some(images[frame_info.frame_index].lock().unwrap()),
-                             ResourceType::Buffer(_) => None,
-                         };
-                         if let Some(image) = image_guard {
-
-                             let mut clear_value = vk::ClearValue::default();
-                             clear_value.color = CLEAR_COLOR;
-
-                             let mut attachment = vk::RenderingAttachmentInfo::default()
-                                 .image_view(image.image_view)
-                                 .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                                 .load_op(vk::AttachmentLoadOp::CLEAR) 
-                                 .store_op(vk::AttachmentStoreOp::STORE)
-                                 .clear_value(clear_value);
-                             
-                             if let Some(resolve_handle) = &output.resolve_target {
-                                 if let Some(resolve_physical) = self.resources.get(&resolve_handle.0) {
-                                     let resolve_image_guard = match &resolve_physical.resource {
-                                         ResourceType::SwapchainImage(image_arc) => Some(image_arc.lock().unwrap()),
-                                         ResourceType::Image(images) => Some(images[frame_info.frame_index].lock().unwrap()),
-                                         ResourceType::Buffer(_) => None,
-                                     };
-                                     if let Some(resolve_image) = resolve_image_guard {
-                                         attachment = attachment
-                                             .resolve_image_view(resolve_image.image_view)
-                                             .resolve_image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                                             .resolve_mode(vk::ResolveModeFlags::AVERAGE);
-                                     }
-                                 }
-                             }
-                             
-                             color_attachments.push(attachment);
-                             is_dynamic_rendering = true;
-                             
-                             // Use the first attachment's extent as the render area
-                             if render_extent.is_none() {
-                                 render_extent = Some(vk::Extent2D {
-                                     width: image.image_extent.width,
-                                     height: image.image_extent.height,
-                                 });
-                             }
-                         }
-                     }
-                 } else if output.layout == vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL {
-                      if let Some(physical) = self.resources.get(&output.handle.0) {
-                         let image_guard = match &physical.resource {
-                             ResourceType::SwapchainImage(image_arc) => Some(image_arc.lock().unwrap()),
-                             ResourceType::Image(images) => Some(images[frame_info.frame_index].lock().unwrap()),
-                             ResourceType::Buffer(_) => None,
-                         };
-                         if let Some(image) = image_guard {
-
-                             let mut clear_value = vk::ClearValue::default();
-                             clear_value.depth_stencil = CLEAR_DEPTH_STENCIL;
-
-                             let mut depth_att = vk::RenderingAttachmentInfo::default()
-                                 .image_view(image.image_view)
-                                 .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-                                 .load_op(vk::AttachmentLoadOp::CLEAR)
-                                 .store_op(vk::AttachmentStoreOp::STORE)
-                                 .clear_value(clear_value);
-                             
-                             // Handle depth resolve target with RESOLVE_MODE_MAX
-                             if let Some(resolve_handle) = &output.resolve_target {
-                                 if let Some(resolve_physical) = self.resources.get(&resolve_handle.0) {
-                                     let resolve_image_guard = match &resolve_physical.resource {
-                                         ResourceType::SwapchainImage(image_arc) => Some(image_arc.lock().unwrap()),
-                                         ResourceType::Image(images) => Some(images[frame_info.frame_index].lock().unwrap()),
-                                         ResourceType::Buffer(_) => None,
-                                     };
-                                     if let Some(resolve_image) = resolve_image_guard {
-                                         depth_att = depth_att
-                                             .resolve_image_view(resolve_image.image_view)
-                                             .resolve_image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-                                             .resolve_mode(vk::ResolveModeFlags::MAX);
-                                     }
-                                 }
-                             }
-                             
-                             depth_attachment = Some(depth_att);
-                             
-                             is_dynamic_rendering = true;
-                             
-                             // Use the first attachment's extent as the render area (depth if no color)
-                             if render_extent.is_none() {
-                                 render_extent = Some(vk::Extent2D {
-                                     width: image.image_extent.width,
-                                     height: image.image_extent.height,
-                                 });
-                             }
-                         }
-                     }
-                 }
-             }
-             
-             if is_dynamic_rendering {
-                 let extent = render_extent.unwrap_or(swapchain_extent);
-                 
-                 let mut rendering_info = vk::RenderingInfo::default()
-                     .render_area(vk::Rect2D { offset: vk::Offset2D{x:0, y:0}, extent }) 
-                     .layer_count(1)
-                     .color_attachments(&color_attachments);
+                let mut rendering_info = vk::RenderingInfo::default()
+                    .render_area(vk::Rect2D { offset: vk::Offset2D{x:0, y:0}, extent })
+                    .layer_count(1)
+                    .color_attachments(&color_attachments);
                      
-                 if let Some(depth) = &depth_attachment {
-                     rendering_info = rendering_info.depth_attachment(depth);
-                 }
+                if let Some(depth) = &depth_attachment {
+                    rendering_info = rendering_info.depth_attachment(depth);
+                }
                      
-                 let device = self.device.lock().unwrap();
-                 unsafe { device.device.cmd_begin_rendering(command_buffer, &rendering_info); }
-             }
+                let device = self.device.lock().unwrap();
+                unsafe { device.device.cmd_begin_rendering(command_buffer, &rendering_info); }
+            }
 
-             match &pass.execute {
+            match &pass.execute {
                 f => f(&self, &frame_info),
-             }
+            }
              
-             if is_dynamic_rendering {
-                 let device = self.device.lock().unwrap();
-                 unsafe { device.device.cmd_end_rendering(command_buffer); }
-             }
+            if is_dynamic_rendering {
+                let device = self.device.lock().unwrap();
+                unsafe { device.device.cmd_end_rendering(command_buffer); }
+            }
         }
 
         {
@@ -633,7 +618,6 @@ impl BnanRenderGraph {
                 .value(1)
         ];
         
-        // wait transfer operations
         if self.pending_transfers[self.current_frame] {
             wait_semaphores_vec.push(
                 vk::SemaphoreSubmitInfo::default()
@@ -729,7 +713,6 @@ impl BnanRenderGraph {
         
         unsafe {
             
-            // wait transfers
             device.device.wait_for_fences(&[self.transfer_fences[frame]], true, u64::MAX)?;
             device.device.reset_fences(&[self.transfer_fences[frame]])?;
             device.device.reset_command_buffer(cmd_buffer, vk::CommandBufferResetFlags::empty())?;

@@ -9,8 +9,8 @@ use BnanR::core::bnan_device::BnanDevice;
 use BnanR::core::bnan_swapchain::BnanSwapchain;
 use BnanR::core::bnan_window::{BnanWindow, WindowObserver};
 use BnanR::core::bnan_render_graph::graph::BnanRenderGraph;
-use BnanR::core::bnan_render_graph::pass::RenderPass;
-use BnanR::core::bnan_render_graph::pass::RenderPassResource;
+use BnanR::core::bnan_render_graph::pass::{RenderPass, RenderPassResource};
+use BnanR::core::bnan_render_graph::resource::ResourceUsage;
 use crate::simple_system::SimpleSystem;
 
 struct Quit {
@@ -63,20 +63,8 @@ fn main() {
         "Main Render Pass".to_string(),
         vec![],
         vec![
-            RenderPassResource {
-                handle: depth_handle,
-                stage: vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS,
-                layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                resolve_target: None,
-                use_previous_frame: false,
-            },
-            RenderPassResource {
-                handle: color_handle,
-                stage: vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
-                layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                resolve_target: Some(backbuffer),
-                use_previous_frame: false,
-            },
+            RenderPassResource::new(depth_handle, ResourceUsage::DepthStencilAttachment),
+            RenderPassResource::with_resolve(color_handle, ResourceUsage::ColorAttachment, backbuffer),
         ],
 
         Box::new(move |_graph, frame_info| {
