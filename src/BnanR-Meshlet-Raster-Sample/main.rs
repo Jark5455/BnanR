@@ -4,6 +4,7 @@ mod downsample_system;
 use ash::*;
 use cgmath::num_traits::FloatConst;
 use cgmath::Vector3;
+
 use BnanR::core::{make_arcmut, make_rcmut};
 use BnanR::core::bnan_camera::BnanCamera;
 use BnanR::core::bnan_device::BnanDevice;
@@ -144,9 +145,7 @@ fn main() {
         window.lock().unwrap().process_events();
 
         match render_graph.lock().unwrap().execute() {
-            Ok(_) => {
-                quit.borrow_mut().quit = true;
-            },
+            Ok(_) => {},
 
             Err(e) => {
                 if let Some(vk_res) = e.downcast_ref::<vk::Result>() {

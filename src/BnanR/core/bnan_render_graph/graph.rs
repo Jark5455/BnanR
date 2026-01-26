@@ -218,6 +218,34 @@ impl BnanRenderGraph {
         self.passes.push(pass);
     }
     
+    /// Helper to get access flags and stage for a layout+stage combination.
+    /// Returns correct stage for each access type, with special handling for depth resolve.
+    fn get_access_and_stage_for_layout_and_stage(
+        layout: vk::ImageLayout,
+        tracked_stage: vk::PipelineStageFlags2,
+    ) -> (vk::AccessFlags2, vk::PipelineStageFlags2) {
+        match layout {
+            vk::ImageLayout::UNDEFINED => (vk::AccessFlags2::NONE, tracked_stage),
+            vk::ImageLayout::GENERAL => (vk::AccessFlags2::SHADER_STORAGE_WRITE, vk::PipelineStageFlags2::ALL_COMMANDS),
+            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL => (vk::AccessFlags2::COLOR_ATTACHMENT_WRITE, vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT),
+            vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL => {
+                // Use the tracked stage to determine access - critical for depth resolve
+                if tracked_stage == vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT {
+                    // Written by resolve operation at COLOR_ATTACHMENT_OUTPUT
+                    (vk::AccessFlags2::COLOR_ATTACHMENT_WRITE, vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                } else {
+                    // Written by depth test at EARLY_FRAGMENT_TESTS
+                    (vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE, vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS)
+                }
+            },
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL => (vk::AccessFlags2::TRANSFER_READ, vk::PipelineStageFlags2::TRANSFER),
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL => (vk::AccessFlags2::TRANSFER_WRITE, vk::PipelineStageFlags2::TRANSFER),
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL => (vk::AccessFlags2::SHADER_READ, vk::PipelineStageFlags2::FRAGMENT_SHADER),
+            vk::ImageLayout::PRESENT_SRC_KHR => (vk::AccessFlags2::NONE, vk::PipelineStageFlags2::NONE),
+            _ => (vk::AccessFlags2::NONE, tracked_stage),
+        }
+    }
+    
     pub fn execute(&mut self) -> Result<()> {
         
         let (swapchain_loader, swapchain_khr, swapchain_images, swapchain_views, swapchain_extent, swapchain_format) = {
@@ -317,7 +345,7 @@ impl BnanRenderGraph {
              let device = self.device.lock().unwrap();
              let mut barrier_builder = BnanBarrierBuilder::new();
              
-             let mut process_resource = |handle: &ResourceHandle, required_stage, required_layout, use_frame: usize, builder: &mut BnanBarrierBuilder| {
+             let mut process_resource = |handle: &ResourceHandle, required_stage: vk::PipelineStageFlags2, required_layout: vk::ImageLayout, use_frame: usize, builder: &mut BnanBarrierBuilder| {
                  if let Some(physical) = self.resources.get_mut(&handle.0) {
                      let mut needs_barrier = false;
                      
@@ -334,12 +362,78 @@ impl BnanRenderGraph {
                          match &physical.resource {
                              ResourceType::SwapchainImage(image_arc) => {
                                  let image = image_arc.lock().unwrap();
-                                 builder.transition_image_layout(image.image, physical.current_layout, required_layout, None, None).unwrap();
+                                 
+                                 // For swapchain images from UNDEFINED, use COLOR_ATTACHMENT_OUTPUT
+                                 // to synchronize with acquire semaphore wait
+                                 let (src_access, src_stage) = if physical.current_layout == vk::ImageLayout::UNDEFINED {
+                                     (vk::AccessFlags2::NONE, vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                                 } else {
+                                     Self::get_access_and_stage_for_layout_and_stage(
+                                         physical.current_layout, physical.current_stage
+                                     )
+                                 };
+                                 let (dst_access, dst_stage) = Self::get_access_and_stage_for_layout_and_stage(
+                                     required_layout, required_stage
+                                 );
+                                 
+                                 let barrier = vk::ImageMemoryBarrier2::default()
+                                     .old_layout(physical.current_layout)
+                                     .new_layout(required_layout)
+                                     .image(image.image)
+                                     .subresource_range(vk::ImageSubresourceRange {
+                                         aspect_mask: vk::ImageAspectFlags::COLOR,
+                                         base_mip_level: 0,
+                                         level_count: 1,
+                                         base_array_layer: 0,
+                                         layer_count: 1,
+                                     })
+                                     .src_access_mask(src_access)
+                                     .src_stage_mask(src_stage)
+                                     .dst_access_mask(dst_access)
+                                     .dst_stage_mask(dst_stage)
+                                     .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                                     .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED);
+                                 
+                                 builder.push_barrier(barrier);
                              },
                              
                              ResourceType::Image(images) => {
                                  let image = images[use_frame].lock().unwrap();
-                                 builder.transition_image_layout(image.image, physical.current_layout, required_layout, Some(image.mip_levels), None).unwrap();
+                                 
+                                 // Build custom barrier using tracked stage instead of layout-derived stage
+                                 let (src_access, src_stage) = Self::get_access_and_stage_for_layout_and_stage(
+                                     physical.current_layout, physical.current_stage
+                                 );
+                                 let (dst_access, dst_stage) = Self::get_access_and_stage_for_layout_and_stage(
+                                     required_layout, required_stage
+                                 );
+                                 
+                                 let aspect_mask = if required_layout == vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL 
+                                     || physical.current_layout == vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL {
+                                     vk::ImageAspectFlags::DEPTH
+                                 } else {
+                                     vk::ImageAspectFlags::COLOR
+                                 };
+                                 
+                                 let barrier = vk::ImageMemoryBarrier2::default()
+                                     .old_layout(physical.current_layout)
+                                     .new_layout(required_layout)
+                                     .image(image.image)
+                                     .subresource_range(vk::ImageSubresourceRange {
+                                         aspect_mask,
+                                         base_mip_level: 0,
+                                         level_count: image.mip_levels,
+                                         base_array_layer: 0,
+                                         layer_count: 1,
+                                     })
+                                     .src_access_mask(src_access)
+                                     .src_stage_mask(src_stage)
+                                     .dst_access_mask(dst_access)
+                                     .dst_stage_mask(dst_stage)
+                                     .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                                     .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED);
+                                 
+                                 builder.push_barrier(barrier);
                              },
                              
                              ResourceType::Buffer(_) => {
@@ -367,28 +461,18 @@ impl BnanRenderGraph {
                  process_resource(&output.handle, output.stage, output.layout, frame_info.frame_index, &mut barrier_builder);
                  
                  if let Some(resolve_handle) = &output.resolve_target {
-
-                     match output.layout {
-                         vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL => {
-                             process_resource(
-                                 resolve_handle,
-                                 vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS,
-                                 vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                                 frame_info.frame_index,
-                                 &mut barrier_builder,
-                             );
-                         }
-
-                         _ => {
-                             process_resource(
-                                 resolve_handle,
-                                 vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
-                                 vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                                 frame_info.frame_index,
-                                 &mut barrier_builder
-                             );
-                         }
+                     // All resolves (color and depth) happen at COLOR_ATTACHMENT_OUTPUT stage
+                     let resolve_layout = match output.layout {
+                         vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL => vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                         _ => vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
                      };
+                     process_resource(
+                         resolve_handle,
+                         vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+                         resolve_layout,
+                         frame_info.frame_index,
+                         &mut barrier_builder
+                     );
                  }
              }
 
