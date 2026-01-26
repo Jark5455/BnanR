@@ -167,12 +167,6 @@ impl MeshletSystem {
         let ubo_buffers = Self::create_uniform_buffers(device.clone())?;
         let (depth_images, color_images, resolved_depth_images) = Self::create_framebuffer_images(device.clone(), swapchain_extent)?;
 
-        /*
-        let depth_handle = render_graph.lock().unwrap().import_render_image("MeshletDepthBuffer", depth_images.clone());
-        let color_handle = render_graph.lock().unwrap().import_render_image("MeshletColor", color_images.clone());
-        let resolved_depth_handle = render_graph.lock().unwrap().import_render_image("ResolvedDepth", resolved_depth_images.clone());
-         */
-
         let (depth_handle, color_handle, resolved_depth_handle) = Self::create_framebuffer_image_handles(render_graph.clone(), depth_images.clone(), color_images.clone(), resolved_depth_images.clone());
 
         let descriptor_set_layout = Self::create_descriptor_set_layout(device.clone())?;
@@ -234,16 +228,10 @@ impl MeshletSystem {
         let mut archive = BpkArchive::open(archive_path)?;
         
         let dag = archive.load_meshlet_dag(mesh_name)?;
-
-        struct CopyOp {
-            src_offset: u64,
-            dst_offset: u64,
-            size: u64,
-        }
         
-        let mut position_copies: Vec<CopyOp> = Vec::new();
-        let mut vertex_copies: Vec<CopyOp> = Vec::new();
-        let mut index_copies: Vec<CopyOp> = Vec::new();
+        let mut position_copies: Vec<vk::BufferCopy> = Vec::new();
+        let mut vertex_copies: Vec<vk::BufferCopy> = Vec::new();
+        let mut index_copies: Vec<vk::BufferCopy> = Vec::new();
         
         const POSITION_SIZE: u64 = size_of::<Vector3<f32>>() as u64; // Vector3<f32> = 3 * 4 bytes
         const VERTEX_SIZE: u64 = size_of::<Vertex>() as u64;   // Vertex struct = normal(12) + tangent(12) + uv(8)
@@ -284,19 +272,19 @@ impl MeshletSystem {
             self.streaming_buffer.write_data(&alloc, pos_size, &vertices)?;
             self.streaming_buffer.write_data(&alloc, pos_size + vert_size, &triangles)?;
             
-            position_copies.push(CopyOp {
+            position_copies.push(vk::BufferCopy {
                 src_offset: alloc.offset,
                 dst_offset: self.position_offset,
                 size: pos_size,
             });
             
-            vertex_copies.push(CopyOp {
+            vertex_copies.push(vk::BufferCopy {
                 src_offset: alloc.offset + pos_size,
                 dst_offset: self.vertex_offset,
                 size: vert_size,
             });
             
-            index_copies.push(CopyOp {
+            index_copies.push(vk::BufferCopy {
                 src_offset: alloc.offset + pos_size + vert_size,
                 dst_offset: self.index_offset,
                 size: idx_size,
@@ -330,47 +318,15 @@ impl MeshletSystem {
         
         self.render_graph.lock().unwrap().submit_transfer_work(0, |cmd, device| {
             let staging_guard = staging_buffer.lock().unwrap();
-            
-            for copy_op in &position_copies {
-                let region = vk::BufferCopy {
-                    src_offset: copy_op.src_offset,
-                    dst_offset: copy_op.dst_offset,
-                    size: copy_op.size,
-                };
-                unsafe {
-                    device.device.cmd_copy_buffer(cmd, staging_guard.buffer, position_buffer, &[region]);
-                }
-            }
-            
-            for copy_op in &vertex_copies {
-                let region = vk::BufferCopy {
-                    src_offset: copy_op.src_offset,
-                    dst_offset: copy_op.dst_offset,
-                    size: copy_op.size,
-                };
-                unsafe {
-                    device.device.cmd_copy_buffer(cmd, staging_guard.buffer, vertex_buffer, &[region]);
-                }
-            }
-            
-            for copy_op in &index_copies {
-                let region = vk::BufferCopy {
-                    src_offset: copy_op.src_offset,
-                    dst_offset: copy_op.dst_offset,
-                    size: copy_op.size,
-                };
-                unsafe {
-                    device.device.cmd_copy_buffer(cmd, staging_guard.buffer, index_buffer, &[region]);
-                }
+
+            unsafe {
+                device.device.cmd_copy_buffer(cmd, staging_guard.buffer, position_buffer, &position_copies);
+                device.device.cmd_copy_buffer(cmd, staging_guard.buffer, vertex_buffer, &vertex_copies);
+                device.device.cmd_copy_buffer(cmd, staging_guard.buffer, index_buffer, &index_copies);
             }
         })?;
         
         self.meshlet_dag = Some(dag);
-
-        println!("  Positions: {}", self.position_offset / POSITION_SIZE);
-        println!("  Vertices: {}", self.vertex_offset/ VERTEX_SIZE);
-        println!("  Indices: {}", self.index_offset / TRIANGLE_SIZE);
-        
         Ok(())
     }
 
@@ -557,8 +513,6 @@ impl MeshletSystem {
 
         unsafe {
             let device_guard = device.lock().unwrap();
-            let fence = device_guard.device.create_fence(&vk::FenceCreateInfo::default(), None)?;
-
             let command_buffer = device_guard.begin_commands(WorkQueue::GRAPHICS, 1)?[0];
 
             let mut builder = BnanBarrierBuilder::new();
@@ -596,9 +550,7 @@ impl MeshletSystem {
             }
 
             builder.record(&*device_guard, command_buffer);
-
-            device_guard.submit_commands(WorkQueue::GRAPHICS, vec![command_buffer], None, Some(fence))?;
-            device_guard.device.wait_for_fences(&[fence], true, u64::MAX)?;
+            device_guard.submit_commands(WorkQueue::GRAPHICS, vec![command_buffer], None, None)?;
         }
 
         Ok((depth_images, color_images, resolved_depth_images))

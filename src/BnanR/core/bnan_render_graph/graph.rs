@@ -13,29 +13,17 @@ use crate::core::bnan_rendering::{BnanFrameInfo, FRAMES_IN_FLIGHT};
 use crate::core::bnan_render_graph::resource::{ResourceHandle, ResourceType, PhysicalResource, ResourceUsage};
 use crate::core::bnan_render_graph::pass::RenderPass;
 use crate::core::bnan_image::BnanImage;
-
-
-const CLEAR_COLOR: vk::ClearColorValue = vk::ClearColorValue { float32: [0.0118, 0.0118, 0.0118, 1.0] };
-const CLEAR_DEPTH_STENCIL: vk::ClearDepthStencilValue = vk::ClearDepthStencilValue { depth: 1.0, stencil: 0 };
+use crate::core::bnan_render_graph::sync::RenderGraphSync;
 
 pub struct BnanRenderGraph {
     pub device: ArcMut<BnanDevice>,
     pub swapchain: ArcMut<BnanSwapchain>,
     pub window: ArcMut<BnanWindow>,
+    pub sync: RenderGraphSync,
     
     pub passes: Vec<RenderPass>,
     pub resources: HashMap<usize, PhysicalResource>,
     pub resource_counter: usize,
-
-    pub command_buffers: [vk::CommandBuffer; FRAMES_IN_FLIGHT],
-    pub image_available_semaphores: [vk::Semaphore; FRAMES_IN_FLIGHT],
-    pub render_finished_semaphores: Vec<vk::Semaphore>,
-    pub in_flight_fences: [vk::Fence; FRAMES_IN_FLIGHT],
-    
-    pub transfer_command_buffers: [vk::CommandBuffer; FRAMES_IN_FLIGHT],
-    pub transfer_finished_semaphores: [vk::Semaphore; FRAMES_IN_FLIGHT],
-    pub transfer_fences: [vk::Fence; FRAMES_IN_FLIGHT],
-    pub pending_transfers: [bool; FRAMES_IN_FLIGHT],
     
     pub current_frame: usize,
     
@@ -43,118 +31,24 @@ pub struct BnanRenderGraph {
     pub frame_time_reference: Instant,
 }
 
-
-impl Drop for BnanRenderGraph {
-    fn drop(&mut self) {
-        unsafe {
-             let device = self.device.lock().unwrap();
-             device.device.device_wait_idle().unwrap();
-             
-             for i in 0..FRAMES_IN_FLIGHT {
-                device.device.destroy_semaphore(self.image_available_semaphores[i], None);
-                device.device.destroy_fence(self.in_flight_fences[i], None);
-                
-                device.device.destroy_semaphore(self.transfer_finished_semaphores[i], None);
-                device.device.destroy_fence(self.transfer_fences[i], None);
-             }
-             
-             for sem in &self.render_finished_semaphores {
-                 device.device.destroy_semaphore(*sem, None);
-             }
-        }
-    }
-}
-
 impl BnanRenderGraph {
     pub fn new(window: ArcMut<BnanWindow>, device: ArcMut<BnanDevice>, swapchain: ArcMut<BnanSwapchain>) -> Result<Self> {
         
         let swapchain_image_count = swapchain.lock().unwrap().images.len();
-        
-        let (command_buffers, image_available_semaphores, render_finished_semaphores, in_flight_fences,
-             transfer_command_buffers, transfer_finished_semaphores, transfer_fences) = 
-            Self::create_sync_objects(device.clone(), swapchain_image_count as u32)?;
+        let sync = RenderGraphSync::new(device.clone(), swapchain_image_count as u32)?;
         
         Ok(Self {
             device,
             swapchain,
             window,
+            sync,
             passes: Vec::new(),
             resources: HashMap::new(),
             resource_counter: 0,
-            command_buffers,
-            image_available_semaphores,
-            render_finished_semaphores,
-            in_flight_fences,
-            transfer_command_buffers,
-            transfer_finished_semaphores,
-            transfer_fences,
-            pending_transfers: [false; FRAMES_IN_FLIGHT],
             current_frame: 0,
             swapchain_resource_handle: Some(ResourceHandle(0)),
             frame_time_reference: Instant::now(),
         })
-    }
-    
-    fn create_sync_objects(device: ArcMut<BnanDevice>, swapchain_image_count: u32) -> Result<(
-        [vk::CommandBuffer; FRAMES_IN_FLIGHT],
-        [vk::Semaphore; FRAMES_IN_FLIGHT],
-        Vec<vk::Semaphore>,
-        [vk::Fence; FRAMES_IN_FLIGHT],
-        [vk::CommandBuffer; FRAMES_IN_FLIGHT],
-        [vk::Semaphore; FRAMES_IN_FLIGHT],
-        [vk::Fence; FRAMES_IN_FLIGHT],
-    )> {
-         let device_guard = device.lock().unwrap();
-         
-         let alloc_info = vk::CommandBufferAllocateInfo::default()
-            .command_pool(device_guard.command_pools[0])
-            .level(vk::CommandBufferLevel::PRIMARY)
-            .command_buffer_count(FRAMES_IN_FLIGHT as u32);
-            
-         let command_buffers = unsafe { device_guard.device.allocate_command_buffers(&alloc_info)? };
-         let command_buffers_array: [vk::CommandBuffer; FRAMES_IN_FLIGHT] = command_buffers.try_into().map_err(|_| anyhow!("Failed"))?;
-
-         let transfer_alloc_info = vk::CommandBufferAllocateInfo::default()
-            .command_pool(device_guard.command_pools[BnanDevice::TRANSFER_COMMAND_POOL])
-            .level(vk::CommandBufferLevel::PRIMARY)
-            .command_buffer_count(FRAMES_IN_FLIGHT as u32);
-            
-         let transfer_command_buffers = unsafe { device_guard.device.allocate_command_buffers(&transfer_alloc_info)? };
-         let transfer_command_buffers_array: [vk::CommandBuffer; FRAMES_IN_FLIGHT] = transfer_command_buffers.try_into().map_err(|_| anyhow!("Failed"))?;
-
-         let semaphore_info = vk::SemaphoreCreateInfo::default();
-         let fence_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
-         
-         let mut image_sem = Vec::new();
-         let mut render_sem = Vec::new();
-         let mut fences = Vec::new();
-         let mut transfer_sem = Vec::new();
-         let mut transfer_fences_vec = Vec::new();
-         
-         for _ in 0..FRAMES_IN_FLIGHT {
-             unsafe {
-                 image_sem.push(device_guard.device.create_semaphore(&semaphore_info, None)?);
-                 fences.push(device_guard.device.create_fence(&fence_info, None)?);
-                 transfer_sem.push(device_guard.device.create_semaphore(&semaphore_info, None)?);
-                 transfer_fences_vec.push(device_guard.device.create_fence(&fence_info, None)?);
-             }
-         }
-         
-         for _ in 0..swapchain_image_count {
-             unsafe {
-                 render_sem.push(device_guard.device.create_semaphore(&semaphore_info, None)?);
-             }
-         }
-         
-         Ok((
-            command_buffers_array,
-            image_sem.try_into().unwrap(),
-            render_sem,
-            fences.try_into().unwrap(),
-            transfer_command_buffers_array,
-            transfer_sem.try_into().unwrap(),
-            transfer_fences_vec.try_into().unwrap(),
-         ))
     }
 
     pub fn get_backbuffer_handle(&self) -> ResourceHandle {
@@ -226,12 +120,13 @@ impl BnanRenderGraph {
             vk::ImageLayout::GENERAL => (vk::AccessFlags2::SHADER_STORAGE_WRITE, vk::PipelineStageFlags2::ALL_COMMANDS),
             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL => (vk::AccessFlags2::COLOR_ATTACHMENT_WRITE, vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT),
             vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL => {
-                // Depth resolve uses COLOR_ATTACHMENT_OUTPUT stage with COLOR_ATTACHMENT_WRITE access
+                // Depth resolve uses COLOR_ATTACHMENT_OUTPUT stage with COLOR_ATTACHMENT_WRITE access for resolve
+                // But for regular attachment it's DEPTH_STENCIL_ATTACHMENT_WRITE
+                // If we are coming from a resolve, current_stage would look like COLOR_ATTACHMENT_OUTPUT (from barrier logic)
                 if current_stage == vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT {
-                    (vk::AccessFlags2::COLOR_ATTACHMENT_WRITE, vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                     (vk::AccessFlags2::COLOR_ATTACHMENT_WRITE, vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
                 } else {
-                    // Regular depth test uses EARLY_FRAGMENT_TESTS with depth access
-                    (vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE, vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS)
+                     (vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE, vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS)
                 }
             },
             vk::ImageLayout::TRANSFER_SRC_OPTIMAL => (vk::AccessFlags2::TRANSFER_READ, vk::PipelineStageFlags2::TRANSFER),
@@ -244,17 +139,13 @@ impl BnanRenderGraph {
     
     fn get_aspect_mask_for_format(format: vk::Format) -> vk::ImageAspectFlags {
         match format {
-            // Depth-only formats
             vk::Format::D16_UNORM | vk::Format::D32_SFLOAT | vk::Format::X8_D24_UNORM_PACK32 => {
                 vk::ImageAspectFlags::DEPTH
             }
-            // Depth-stencil formats
             vk::Format::D16_UNORM_S8_UINT | vk::Format::D24_UNORM_S8_UINT | vk::Format::D32_SFLOAT_S8_UINT => {
                 vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
             }
-            // Stencil-only
             vk::Format::S8_UINT => vk::ImageAspectFlags::STENCIL,
-            // Everything else is color
             _ => vk::ImageAspectFlags::COLOR,
         }
     }
@@ -275,19 +166,13 @@ impl BnanRenderGraph {
              )
         };
 
-        {
-            let device = self.device.lock().unwrap();
-            unsafe {
-                device.device.wait_for_fences(&[self.in_flight_fences[self.current_frame]], true, u64::MAX)?;
-                device.device.reset_fences(&[self.in_flight_fences[self.current_frame]])?;
-            }
-        }
+        self.sync.wait_and_reset_in_flight(self.current_frame)?;
         
         let acquire_result = unsafe {
             swapchain_loader.acquire_next_image(
                 swapchain_khr,
                 u64::MAX,
-                self.image_available_semaphores[self.current_frame],
+                self.sync.image_available_semaphores[self.current_frame],
                 vk::Fence::null()
             )
         };
@@ -298,11 +183,10 @@ impl BnanRenderGraph {
                  self.recreate_swapchain()?;
                  return Ok(());
             }
-
             Err(e) => return Err(Error::new(e)),
         };
         
-        let command_buffer = self.command_buffers[self.current_frame];
+        let command_buffer = self.sync.get_command_buffer(self.current_frame);
         let swapchain_image = swapchain_images[image_index as usize];
         let swapchain_view = swapchain_views[image_index as usize];
         
@@ -314,7 +198,6 @@ impl BnanRenderGraph {
             vk::Extent3D { width: swapchain_extent.width, height: swapchain_extent.height, depth: 1 }
         ));
         
-        // Update the physical resource tracking for swapchain
         if self.swapchain_resource_handle.is_none() {
             let handle = ResourceHandle(self.resource_counter);
             self.resource_counter += 1;
@@ -323,6 +206,7 @@ impl BnanRenderGraph {
         
         let swapchain_handle = self.swapchain_resource_handle.clone().unwrap();
         
+        // Update swapchain physical resource
         let swapchain_physical = PhysicalResource {
             handle: swapchain_handle.clone(),
             name: "Backbuffer".to_string(),
@@ -331,7 +215,6 @@ impl BnanRenderGraph {
             current_stage: vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
             current_queue_family: vk::QUEUE_FAMILY_IGNORED,
         };
-        
         self.resources.insert(swapchain_handle.0, swapchain_physical);
 
         {
@@ -359,7 +242,6 @@ impl BnanRenderGraph {
                 let device = self.device.lock().unwrap();
                 let mut barrier_builder = BnanBarrierBuilder::new();
 
-                // Process a resource usage, emitting barriers as needed
                 let mut process_resource = |handle: &ResourceHandle, usage: ResourceUsage, use_frame: usize, builder: &mut BnanBarrierBuilder| {
                     let (required_stage, required_access) = usage.get_stage_and_access();
                     let required_layout = usage.get_layout();
@@ -376,7 +258,9 @@ impl BnanRenderGraph {
                                     let (src_access, src_stage) = Self::get_src_access_and_stage(
                                         physical.current_layout, physical.current_stage, true
                                     );
-
+                                    
+                                    // Use raw barrier push for flexibility or use builder's transition
+                                    // Here we use push_barrier to have full control over access flags
                                     let barrier = vk::ImageMemoryBarrier2::default()
                                         .old_layout(physical.current_layout)
                                         .new_layout(required_layout)
@@ -391,9 +275,7 @@ impl BnanRenderGraph {
                                         .src_access_mask(src_access)
                                         .src_stage_mask(src_stage)
                                         .dst_access_mask(required_access)
-                                        .dst_stage_mask(required_stage)
-                                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED);
+                                        .dst_stage_mask(required_stage);
 
                                     builder.push_barrier(barrier);
                                 },
@@ -404,7 +286,6 @@ impl BnanRenderGraph {
                                         physical.current_layout, physical.current_stage, false
                                     );
 
-                                    // Detect aspect from image format, not usage
                                     let aspect_mask = Self::get_aspect_mask_for_format(image.format);
 
                                     let barrier = vk::ImageMemoryBarrier2::default()
@@ -421,15 +302,13 @@ impl BnanRenderGraph {
                                         .src_access_mask(src_access)
                                         .src_stage_mask(src_stage)
                                         .dst_access_mask(required_access)
-                                        .dst_stage_mask(required_stage)
-                                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED);
+                                        .dst_stage_mask(required_stage);
 
                                     builder.push_barrier(barrier);
                                 },
 
                                 ResourceType::Buffer(_) => {
-                                    todo!("Buffer barriers")
+                                    // todo buffers
                                 }
                             }
 
@@ -439,7 +318,6 @@ impl BnanRenderGraph {
                     }
                 };
 
-                // Process inputs
                 for input in &pass.inputs {
                     let use_frame = if input.is_temporal {
                         (frame_info.frame_index + (FRAMES_IN_FLIGHT - 1)) % FRAMES_IN_FLIGHT
@@ -449,12 +327,9 @@ impl BnanRenderGraph {
                     process_resource(&input.handle, input.usage, use_frame, &mut barrier_builder);
                 }
 
-                // Process outputs and resolve targets
                 for output in &pass.outputs {
                     process_resource(&output.handle, output.usage, frame_info.frame_index, &mut barrier_builder);
-
                     if let Some(resolve_handle) = &output.resolve_target {
-                        // Resolve targets use DepthStencilResolve for depth, ColorAttachment for color
                         let resolve_usage = match output.usage {
                             ResourceUsage::DepthStencilAttachment => ResourceUsage::DepthStencilResolve,
                             _ => ResourceUsage::ColorAttachment,
@@ -466,6 +341,7 @@ impl BnanRenderGraph {
                 barrier_builder.record(&device, command_buffer);
             }
 
+            // --- Dynamic Rendering Setup ---
             let mut is_dynamic_rendering = false;
             let mut color_attachments = Vec::new();
             let mut depth_attachment: Option<vk::RenderingAttachmentInfo> = None;
@@ -479,18 +355,10 @@ impl BnanRenderGraph {
                             ResourceType::Image(images) => Some(images[frame_info.frame_index].lock().unwrap()),
                             ResourceType::Buffer(_) => None,
                         };
+                        
                         if let Some(image) = image_guard {
-
-                            let mut clear_value = vk::ClearValue::default();
-                            clear_value.color = CLEAR_COLOR;
-
-                            let mut attachment = vk::RenderingAttachmentInfo::default()
-                                .image_view(image.image_view)
-                                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                                .load_op(vk::AttachmentLoadOp::CLEAR)
-                                .store_op(vk::AttachmentStoreOp::STORE)
-                                .clear_value(clear_value);
-                             
+                            // Resolve handling
+                            let mut resolve_view = None;
                             if let Some(resolve_handle) = &output.resolve_target {
                                 if let Some(resolve_physical) = self.resources.get(&resolve_handle.0) {
                                     let resolve_image_guard = match &resolve_physical.resource {
@@ -499,14 +367,12 @@ impl BnanRenderGraph {
                                         ResourceType::Buffer(_) => None,
                                     };
                                     if let Some(resolve_image) = resolve_image_guard {
-                                        attachment = attachment
-                                            .resolve_image_view(resolve_image.image_view)
-                                            .resolve_image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                                            .resolve_mode(vk::ResolveModeFlags::AVERAGE);
+                                        resolve_view = Some(resolve_image.image_view);
                                     }
                                 }
                             }
-                             
+
+                            let attachment = output.create_color_attachment_info(image.image_view, resolve_view);
                             color_attachments.push(attachment);
                             is_dynamic_rendering = true;
                              
@@ -527,17 +393,8 @@ impl BnanRenderGraph {
                         };
 
                         if let Some(image) = image_guard {
-
-                            let mut clear_value = vk::ClearValue::default();
-                            clear_value.depth_stencil = CLEAR_DEPTH_STENCIL;
-
-                            let mut depth_att = vk::RenderingAttachmentInfo::default()
-                                .image_view(image.image_view)
-                                .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-                                .load_op(vk::AttachmentLoadOp::CLEAR)
-                                .store_op(vk::AttachmentStoreOp::STORE)
-                                .clear_value(clear_value);
-                             
+                            // Resolve handling
+                            let mut resolve_view = None;
                             if let Some(resolve_handle) = &output.resolve_target {
                                 if let Some(resolve_physical) = self.resources.get(&resolve_handle.0) {
                                     let resolve_image_guard = match &resolve_physical.resource {
@@ -545,18 +402,13 @@ impl BnanRenderGraph {
                                         ResourceType::Image(images) => Some(images[frame_info.frame_index].lock().unwrap()),
                                         ResourceType::Buffer(_) => None,
                                     };
-
                                     if let Some(resolve_image) = resolve_image_guard {
-                                        depth_att = depth_att
-                                            .resolve_image_view(resolve_image.image_view)
-                                            .resolve_image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-                                            .resolve_mode(vk::ResolveModeFlags::MAX);
+                                        resolve_view = Some(resolve_image.image_view);
                                     }
                                 }
                             }
-                             
-                            depth_attachment = Some(depth_att);
-                             
+
+                            depth_attachment = Some(output.create_depth_attachment_info(image.image_view, resolve_view));
                             is_dynamic_rendering = true;
                              
                             if render_extent.is_none() {
@@ -596,9 +448,9 @@ impl BnanRenderGraph {
             }
         }
 
+        // --- Final Swapchain Transition ---
         {
             let device = self.device.lock().unwrap();
-            
             let swapchain_handle = self.swapchain_resource_handle.clone().unwrap();
             let physical = self.resources.get(&swapchain_handle.0).unwrap();
 
@@ -613,24 +465,24 @@ impl BnanRenderGraph {
         
         let mut wait_semaphores_vec = vec![
             vk::SemaphoreSubmitInfo::default()
-                .semaphore(self.image_available_semaphores[self.current_frame])
+                .semaphore(self.sync.image_available_semaphores[self.current_frame])
                 .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
                 .value(1)
         ];
         
-        if self.pending_transfers[self.current_frame] {
+        if self.sync.pending_transfer_signal[self.current_frame] {
             wait_semaphores_vec.push(
                 vk::SemaphoreSubmitInfo::default()
-                    .semaphore(self.transfer_finished_semaphores[self.current_frame])
+                    .semaphore(self.sync.transfer_finished_semaphores[self.current_frame])
                     .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
                     .value(1)
             );
-            self.pending_transfers[self.current_frame] = false;
+            self.sync.pending_transfer_signal[self.current_frame] = false;
         }
         
         let signal_semaphores = [
             vk::SemaphoreSubmitInfo::default()
-                .semaphore(self.render_finished_semaphores[image_index as usize])
+                .semaphore(self.sync.render_finished_semaphores[image_index as usize])
                 .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
                 .value(1)
         ];
@@ -649,11 +501,11 @@ impl BnanRenderGraph {
         {
              let device = self.device.lock().unwrap();
              unsafe {
-                device.device.queue_submit2(graphics_queue, &submit_info, self.in_flight_fences[self.current_frame])?;
+                device.device.queue_submit2(graphics_queue, &submit_info, self.sync.in_flight_fences[self.current_frame])?;
              }
         }
         
-        let wait_semaphores_present = [self.render_finished_semaphores[image_index as usize]];
+        let wait_semaphores_present = [self.sync.render_finished_semaphores[image_index as usize]];
         let swapchains = [swapchain_khr];
         let image_indices = [image_index];
 
@@ -682,24 +534,7 @@ impl BnanRenderGraph {
          self.swapchain.lock().unwrap().recreate_swapchain(extent)?;
          
          let image_count = self.swapchain.lock().unwrap().images.len();
-         
-         if image_count != self.render_finished_semaphores.len() {
-             let device = self.device.lock().unwrap();
-             unsafe {
-                 device.device.device_wait_idle()?;
-                 
-                 for sem in &self.render_finished_semaphores {
-                     device.device.destroy_semaphore(*sem, None);
-                 }
-                 
-                 self.render_finished_semaphores.clear();
-                 
-                 let semaphore_info = vk::SemaphoreCreateInfo::default();
-                 for _ in 0..image_count {
-                     self.render_finished_semaphores.push(device.device.create_semaphore(&semaphore_info, None)?);
-                 }
-             }
-         }
+         self.sync.recreate_semaphores(image_count)?;
          
          Ok(())
     }
@@ -709,12 +544,11 @@ impl BnanRenderGraph {
         F: FnOnce(vk::CommandBuffer, &BnanDevice),
     {
         let device = self.device.lock().unwrap();
-        let cmd_buffer = self.transfer_command_buffers[frame];
+        let cmd_buffer = self.sync.transfer_command_buffers[frame];
         
         unsafe {
-            
-            device.device.wait_for_fences(&[self.transfer_fences[frame]], true, u64::MAX)?;
-            device.device.reset_fences(&[self.transfer_fences[frame]])?;
+            device.device.wait_for_fences(&[self.sync.transfer_fences[frame]], true, u64::MAX)?;
+            device.device.reset_fences(&[self.sync.transfer_fences[frame]])?;
             device.device.reset_command_buffer(cmd_buffer, vk::CommandBufferResetFlags::empty())?;
             
             let begin_info = vk::CommandBufferBeginInfo::default()
@@ -729,7 +563,7 @@ impl BnanRenderGraph {
             
             let signal_semaphores = [
                 vk::SemaphoreSubmitInfo::default()
-                    .semaphore(self.transfer_finished_semaphores[frame])
+                    .semaphore(self.sync.transfer_finished_semaphores[frame])
                     .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
                     .value(1)
             ];
@@ -742,15 +576,15 @@ impl BnanRenderGraph {
                 .command_buffer_infos(&command_buffer_infos)
             ];
             
-            device.device.queue_submit2(device.transfer_queue, &submit_info, self.transfer_fences[frame])?;
+            device.device.queue_submit2(device.transfer_queue, &submit_info, self.sync.transfer_fences[frame])?;
         }
         
-        self.pending_transfers[frame] = true;
+        self.sync.pending_transfer_signal[frame] = true;
         Ok(())
     }
     
     pub fn has_pending_transfers(&self, frame: usize) -> bool {
-        self.pending_transfers[frame]
+        self.sync.pending_transfer_signal[frame]
     }
     
     pub fn get_current_frame(&self) -> usize {

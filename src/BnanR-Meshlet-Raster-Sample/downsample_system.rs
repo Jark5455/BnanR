@@ -286,7 +286,6 @@ impl DownsampleSystem {
         // Transition to TRANSFER_DST, clear with 1.0, then transition to GENERAL
         unsafe {
             let device_guard = device.lock().unwrap();
-            let fence = device_guard.device.create_fence(&vk::FenceCreateInfo::default(), None)?;
             let command_buffer = device_guard.begin_commands(WorkQueue::GRAPHICS, 1)?[0];
             
             // First transition to TRANSFER_DST_OPTIMAL for clearing
@@ -366,9 +365,7 @@ impl DownsampleSystem {
             
             post_clear_builder.record(&*device_guard, command_buffer);
             
-            device_guard.submit_commands(WorkQueue::GRAPHICS, vec![command_buffer], None, Some(fence))?;
-            device_guard.device.wait_for_fences(&[fence], true, u64::MAX)?;
-            device_guard.device.destroy_fence(fence, None);
+            device_guard.submit_commands(WorkQueue::GRAPHICS, vec![command_buffer], None, None)?;
         }
 
         Ok(images_array)
