@@ -334,12 +334,12 @@ impl BnanRenderGraph {
                          match &physical.resource {
                              ResourceType::SwapchainImage(image_arc) => {
                                  let image = image_arc.lock().unwrap();
-                                 builder.transition_image_layout(image.image, physical.current_layout, required_layout, None, None, None).unwrap();
+                                 builder.transition_image_layout(image.image, physical.current_layout, required_layout, None, None).unwrap();
                              },
                              
                              ResourceType::Image(images) => {
                                  let image = images[use_frame].lock().unwrap();
-                                 builder.transition_image_layout(image.image, physical.current_layout, required_layout, None, Some(image.mip_levels), None).unwrap();
+                                 builder.transition_image_layout(image.image, physical.current_layout, required_layout, Some(image.mip_levels), None).unwrap();
                              },
                              
                              ResourceType::Buffer(_) => {
@@ -534,7 +534,7 @@ impl BnanRenderGraph {
             let physical = self.resources.get(&swapchain_handle.0).unwrap();
 
             let builder = BnanBarrierBuilder::new()
-                .transition_image_layout(swapchain_image, physical.current_layout, vk::ImageLayout::PRESENT_SRC_KHR, None, None, None)?
+                .transition_image_layout(swapchain_image, physical.current_layout, vk::ImageLayout::PRESENT_SRC_KHR, None, None)?
                 .record(&*device, command_buffer);
 
             unsafe {

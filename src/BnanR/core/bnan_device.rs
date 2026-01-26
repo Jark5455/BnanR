@@ -125,13 +125,50 @@ impl BnanBarrierBuilder {
         image: vk::Image,
         old_layout: vk::ImageLayout,
         new_layout: vk::ImageLayout,
-        undefined_exec_stage: Option<vk::PipelineStageFlags2>,
         levels: Option<u32>,
         layers: Option<u32>,
     ) -> Result<&mut Self> {
         let barrier = BnanDevice::build_image_transition_barrier(
-            image, old_layout, new_layout, undefined_exec_stage, levels, layers
+            image, old_layout, new_layout, levels.clone(), layers.clone()
         )?;
+
+        /*
+        // flush writes if write - write barrier
+        match barrier.src_access_mask {
+            vk::AccessFlags2::SHADER_STORAGE_WRITE |
+            vk::AccessFlags2::COLOR_ATTACHMENT_WRITE |
+            vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE |
+            vk::AccessFlags2::TRANSFER_WRITE
+
+            => {
+                let flush_access = match barrier.dst_access_mask {
+                    vk::AccessFlags2::SHADER_STORAGE_WRITE |
+                    vk::AccessFlags2::COLOR_ATTACHMENT_WRITE |
+                    vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE => Some(vk::AccessFlags2::NONE),
+
+                    _ => {None}
+                };
+
+                if let Some(flush_access) = flush_access {
+
+                    self.flush_writes(
+                        image.clone(),
+                        old_layout,
+                        barrier.src_stage_mask,
+                        barrier.src_access_mask,
+                        barrier.dst_stage_mask,
+                        flush_access,
+                        levels,
+                        layers
+                    );
+                }
+            }
+
+            _ => {}
+        }
+
+
+         */
 
         self.image_barriers.push(barrier);
         Ok(self)
@@ -323,7 +360,7 @@ impl BnanDevice {
         properties
     }
     
-    pub fn build_image_transition_barrier(image: vk::Image, old_layout: vk::ImageLayout, new_layout: vk::ImageLayout, undefined_exec_stage: Option<vk::PipelineStageFlags2>, levels: Option<u32>, layers: Option<u32>) -> Result<vk::ImageMemoryBarrier2<'static>> {
+    pub fn build_image_transition_barrier(image: vk::Image, old_layout: vk::ImageLayout, new_layout: vk::ImageLayout, levels: Option<u32>, layers: Option<u32>) -> Result<vk::ImageMemoryBarrier2<'static>> {
 
         let aspect_mask = match new_layout == vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL || old_layout == vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL {
             true => {vk::ImageAspectFlags::DEPTH}
@@ -338,7 +375,7 @@ impl BnanDevice {
             .layer_count(layers.unwrap_or(1));
 
         let (src_access_mask, src_stage_mask) = match old_layout {
-            vk::ImageLayout::UNDEFINED => (vk::AccessFlags2::NONE, undefined_exec_stage.unwrap_or(vk::PipelineStageFlags2::NONE)),
+            vk::ImageLayout::UNDEFINED => (vk::AccessFlags2::NONE, vk::PipelineStageFlags2::NONE),
             vk::ImageLayout::GENERAL => (vk::AccessFlags2::SHADER_STORAGE_WRITE, vk::PipelineStageFlags2::ALL_COMMANDS),
             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL => (vk::AccessFlags2::COLOR_ATTACHMENT_WRITE, vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT),
             vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL => (vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE, vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS),
@@ -355,7 +392,7 @@ impl BnanDevice {
             vk::ImageLayout::TRANSFER_SRC_OPTIMAL => (vk::AccessFlags2::TRANSFER_READ, vk::PipelineStageFlags2::TRANSFER),
             vk::ImageLayout::TRANSFER_DST_OPTIMAL => (vk::AccessFlags2::TRANSFER_WRITE, vk::PipelineStageFlags2::TRANSFER),
             vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL => (vk::AccessFlags2::SHADER_READ, vk::PipelineStageFlags2::FRAGMENT_SHADER),
-            vk::ImageLayout::PRESENT_SRC_KHR => (vk::AccessFlags2::NONE, undefined_exec_stage.unwrap_or(vk::PipelineStageFlags2::NONE)),
+            vk::ImageLayout::PRESENT_SRC_KHR => (vk::AccessFlags2::NONE, vk::PipelineStageFlags2::NONE),
             _ => bail!("unsupported layout transition"),
         };
 

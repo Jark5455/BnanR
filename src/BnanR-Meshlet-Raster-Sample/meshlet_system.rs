@@ -564,11 +564,11 @@ impl MeshletSystem {
             let mut builder = BnanBarrierBuilder::new();
 
             for image in &depth_images {
-                builder.transition_image_layout(image.lock().unwrap().image, vk::ImageLayout::UNDEFINED, vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL, None, None, None)?;
+                builder.transition_image_layout(image.lock().unwrap().image, vk::ImageLayout::UNDEFINED, vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL, None, None)?;
             }
 
             for image in &color_images {
-                builder.transition_image_layout(image.lock().unwrap().image, vk::ImageLayout::UNDEFINED, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, None, None, None)?;
+                builder.transition_image_layout(image.lock().unwrap().image, vk::ImageLayout::UNDEFINED, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, None, None)?;
             }
             
             // Resolved depth images: transition to SHADER_READ_ONLY_OPTIMAL with explicit DEPTH aspect

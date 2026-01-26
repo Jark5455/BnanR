@@ -145,8 +145,7 @@ fn main() {
 
         match render_graph.lock().unwrap().execute() {
             Ok(_) => {
-                count += 1;
-                if count == 2 { quit.borrow_mut().quit = false; }
+                quit.borrow_mut().quit = true;
             },
 
             Err(e) => {
